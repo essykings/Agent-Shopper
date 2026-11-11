@@ -27,6 +27,8 @@ export interface BuyDeps {
   maxSteps?: number;
   /** Stops the agent once one run has used this many tokens. */
   maxTotalTokens?: number;
+  /** Most milliseconds one shopper run may take. */
+  deadlineMs?: number;
   /** Live steps for the Playground and the Town square. */
   onEvent?: Emit;
   now?: () => Date;
@@ -178,6 +180,7 @@ export async function proposeAndBuy(
       ...(deps.effort ? { effort: deps.effort } : {}),
       ...(deps.maxSteps ? { maxSteps: deps.maxSteps } : {}),
       ...(deps.maxTotalTokens ? { maxTotalTokens: deps.maxTotalTokens } : {}),
+      ...(deps.deadlineMs ? { deadlineMs: deps.deadlineMs } : {}),
       ...(deps.onEvent ? { onEvent: deps.onEvent } : {}),
     },
     { mandate, shops: input.shops },

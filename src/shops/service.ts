@@ -35,12 +35,24 @@ const daysFrom = (now: Date, days: number): string => {
 };
 
 /** Makes sure every demo shop and its state row exist. Safe to run again, and from several services. */
-export async function seedShops(pool: Pool, payoutEmail: string): Promise<void> {
+/** Only used when a shop row is first made without an email. Payouts to it would fail, which is visible and harmless. */
+export const PLACEHOLDER_PAYOUT_EMAIL = "shops@example.com";
+
+export async function seedShops(pool: Pool, payoutEmail: string | null): Promise<void> {
   for (const s of SHOPS) {
-    await pool.query(
-      "insert into shops (id, name, payout_email) values ($1, $2, $3) on conflict (id) do update set name = excluded.name, payout_email = excluded.payout_email",
-      [s.id, s.name, payoutEmail],
-    );
+    if (payoutEmail !== null) {
+      await pool.query(
+        "insert into shops (id, name, payout_email) values ($1, $2, $3) on conflict (id) do update set name = excluded.name, payout_email = excluded.payout_email",
+        [s.id, s.name, payoutEmail],
+      );
+    } else {
+      // No email was given (a shop service that was not told where to pay). A new row gets a placeholder, but a real
+      // email already on the row is never replaced, whichever service happens to start last.
+      await pool.query(
+        "insert into shops (id, name, payout_email) values ($1, $2, $3) on conflict (id) do update set name = excluded.name",
+        [s.id, s.name, PLACEHOLDER_PAYOUT_EMAIL],
+      );
+    }
     await pool.query("insert into shop_state (shop_id) values ($1) on conflict (shop_id) do nothing", [s.id]);
   }
 }

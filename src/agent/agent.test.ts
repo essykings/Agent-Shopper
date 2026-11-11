@@ -797,3 +797,90 @@ test("a product page's own text is unchanged by links: quotes still come from th
   assert.ok(links.every((l) => l.url.startsWith("http://northgear.localhost:4101/")));
 });
 
+// ---------- time limits: nothing can hold a run past its time ----------
+
+const never = (): Promise<Anthropic.Message> => new Promise<Anthropic.Message>(() => undefined);
+const nap = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("a model that never answers cannot hang a run: the deadline ends it, even if the model ignores cancellation", { skip }, async () => {
+  const started = Date.now();
+  const run = await runShopperAgent(arena({ deadlineMs: 150 }).base(scripted([() => never()])), { mandate, shops: REFS });
+  assert.deepEqual(run.outcome, { status: "time_limit" });
+  assert.ok(Date.now() - started < 1500, `ended after ${Date.now() - started} ms`);
+  assert.deepEqual([run.steps, run.actions.length], [1, 0]);
+});
+
+test("the model is handed a signal that is cancelled at the deadline, so a real call stops instead of running on", { skip }, async () => {
+  let signal: AbortSignal | undefined;
+  const model: ModelPort = (_params, opts) => {
+    signal = opts?.signal;
+    return new Promise((_resolve, reject) => opts?.signal?.addEventListener("abort", () => reject(new Error("The request was cancelled."))));
+  };
+  const run = await runShopperAgent(arena({ deadlineMs: 120 }).base(model), { mandate, shops: REFS });
+  assert.equal(run.outcome.status, "time_limit", "the cancellation is the deadline, not a failure");
+  assert.ok(signal?.aborted, "the call was told to stop");
+  // Without a deadline the signal is still offered, and never cancelled.
+  let free: AbortSignal | undefined;
+  await runShopperAgent(arena().base(((_p: unknown, opts?: { signal?: AbortSignal }) => { free = opts?.signal; return Promise.resolve(reply([use("a", "give_up", { reason: "x" })])); }) as ModelPort), { mandate, shops: REFS });
+  assert.equal(free?.aborted, false);
+});
+
+test("a real error from the model is still an error, not mistaken for running out of time, and no timer is left behind", { skip }, async () => {
+  const broken: ModelPort = () => Promise.reject(new Error("The model service is down."));
+  await assert.rejects(runShopperAgent(arena({ deadlineMs: 60_000 }).base(broken), { mandate, shops: REFS }), /The model service is down/);
+});
+
+test("a gift run that runs out of time keeps the ideas it already had accepted", { skip }, async () => {
+  let id = "";
+  const model = scripted([
+    () => reply([use("a", "open_page", { url: `${T}/products/hiking-pole` }), use("b", "check_seller", { shop_id: "trailhead" })]),
+    (p) => {
+      id = lastResults(p)[0]!.data.snapshot_id;
+      return reply([use("c", "propose_purchase", { snapshot_id: id, reasoning: "He hikes.", claims: giftClaim("Hiking pole, carbon") })]);
+    },
+    () => never(),
+  ]);
+  const run = await runShopperAgent(arena({ deadlineMs: 600 }).base(model), { mandate: giftMandate, shops: REFS });
+  assert.equal(run.outcome.status, "shortlist");
+  if (run.outcome.status === "shortlist") {
+    assert.equal(run.outcome.picks.length, 1);
+    assert.match(run.outcome.summary, /Stopped early/);
+  }
+});
+
+test("the deadline is also checked between the tools of one turn, so slow pages cannot run on past it", { skip }, async () => {
+  const real = arena().base(scripted([])).fetchPage;
+  const slow: typeof real = async (u) => {
+    await nap(120);
+    return real(u);
+  };
+  const model = scripted([() => reply([1, 2, 3, 4].map((n) => use(`o${n}`, "open_page", { url: `${N}/search?q=kit${n}` })))]);
+  const run = await runShopperAgent(arena({ fetchPage: slow, deadlineMs: 200 }).base(model), { mandate, shops: REFS });
+  assert.equal(run.outcome.status, "time_limit");
+  const opened = run.actions.filter((a) => a.tool === "open_page").length;
+  assert.ok(opened >= 1 && opened <= 3, `opened ${opened} of 4 pages before time ran out`);
+});
+
+test("the model is told how many seconds are left, and warned when they run low", { skip }, async () => {
+  const real = arena().base(scripted([])).fetchPage;
+  const slow: typeof real = async (u) => {
+    await nap(1200);
+    return real(u);
+  };
+  let budget: { seconds_left?: number; advice?: string } = {};
+  const model = scripted([
+    () => reply([use("a", "open_page", { url: `${N}/` })]),
+    (p) => {
+      budget = lastResults(p)[0]!.data.budget;
+      return reply([use("b", "give_up", { reason: "x" })]);
+    },
+  ]);
+  await runShopperAgent(arena({ fetchPage: slow, deadlineMs: 2000 }).base(model), { mandate, shops: REFS });
+  assert.ok(budget.seconds_left !== undefined && budget.seconds_left >= 0 && budget.seconds_left <= 1, `seconds_left ${budget.seconds_left}`);
+  assert.match(budget.advice ?? "", /about half your room/, "under half the time left");
+  // With no deadline there is nothing to count down.
+  let plain: { seconds_left?: number } = { seconds_left: -1 };
+  await runShopperAgent(arena().base(scripted([() => reply([use("a", "open_page", { url: `${N}/` })]), (p) => { plain = lastResults(p)[0]!.data.budget; return reply([use("b", "give_up", { reason: "x" })]); }])), { mandate, shops: REFS });
+  assert.equal(plain.seconds_left, undefined);
+});
+

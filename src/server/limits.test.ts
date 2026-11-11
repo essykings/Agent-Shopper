@@ -65,15 +65,15 @@ test("the settings have safe defaults, and the defaults match what the owner ask
 test("settings can be changed, and a typo stops the app instead of silently removing a limit", () => {
   const l = limitsFromEnv({
     LIMIT_IP_RUNS_PER_DAY: "3", LIMIT_USER_RUNS_PER_DAY: "7", LIMIT_IP_PURCHASES_PER_DAY: "2", LIMIT_IP_SIGNUPS_PER_DAY: "4", LIMIT_IP_CONNECTS_PER_DAY: "6", LIMIT_MAX_CONCURRENT: "2",
-    LIMIT_GLOBAL_RUNS_PER_DAY: "50", LIMIT_DAILY_BUDGET_USD: "1.50", LIMIT_RUN_TOKEN_CAP: "100000", TRUSTED_PROXY_HOPS: "1", AGENT_RUNS_ENABLED: "TRUE",
+    LIMIT_GLOBAL_RUNS_PER_DAY: "50", LIMIT_DAILY_BUDGET_USD: "1.50", LIMIT_RUN_TOKEN_CAP: "100000", LIMIT_RUN_SECONDS: "90", TRUSTED_PROXY_HOPS: "1", AGENT_RUNS_ENABLED: "TRUE",
   });
-  assert.deepEqual(l, { enabled: true, ipRunsPerDay: 3, userRunsPerDay: 7, ipPurchasesPerDay: 2, ipSignupsPerDay: 4, ipConnectsPerDay: 6, maxConcurrent: 2, globalRunsPerDay: 50, dailyBudgetUsd: 1.5, runTokenCap: 100000, trustedProxyHops: 1 });
+  assert.deepEqual(l, { enabled: true, ipRunsPerDay: 3, userRunsPerDay: 7, ipPurchasesPerDay: 2, ipSignupsPerDay: 4, ipConnectsPerDay: 6, maxConcurrent: 2, globalRunsPerDay: 50, dailyBudgetUsd: 1.5, runTokenCap: 100000, runDeadlineSeconds: 90, trustedProxyHops: 1 });
   assert.equal(limitsFromEnv({ AGENT_RUNS_ENABLED: "false" }).enabled, false);
   assert.equal(limitsFromEnv({ AGENT_RUNS_ENABLED: "0" }).enabled, false);
   assert.equal(limitsFromEnv({ TRUSTED_PROXY_HOPS: "0" }).trustedProxyHops, 0);
   for (const [name, value] of [
     ["LIMIT_IP_RUNS_PER_DAY", "ten"], ["LIMIT_IP_RUNS_PER_DAY", "0"], ["LIMIT_IP_RUNS_PER_DAY", "-1"], ["LIMIT_IP_RUNS_PER_DAY", "1.5"],
-    ["LIMIT_GLOBAL_RUNS_PER_DAY", "0"], ["LIMIT_IP_SIGNUPS_PER_DAY", "0"], ["LIMIT_IP_CONNECTS_PER_DAY", "0"], ["LIMIT_RUN_TOKEN_CAP", "5"], ["TRUSTED_PROXY_HOPS", "-1"], ["LIMIT_MAX_CONCURRENT", "0"],
+    ["LIMIT_GLOBAL_RUNS_PER_DAY", "0"], ["LIMIT_IP_SIGNUPS_PER_DAY", "0"], ["LIMIT_IP_CONNECTS_PER_DAY", "0"], ["LIMIT_RUN_TOKEN_CAP", "5"], ["LIMIT_RUN_SECONDS", "3"], ["TRUSTED_PROXY_HOPS", "-1"], ["LIMIT_MAX_CONCURRENT", "0"],
     ["LIMIT_DAILY_BUDGET_USD", "abc"], ["LIMIT_DAILY_BUDGET_USD", "0"], ["LIMIT_DAILY_BUDGET_USD", "-2"], ["AGENT_RUNS_ENABLED", "maybe"],
   ] as const) {
     assert.throws(() => limitsFromEnv({ [name]: value }), (err: unknown) => err instanceof Error && err.message.includes(name), `${name}=${value}`);
@@ -429,5 +429,14 @@ test("on Render the header is the visitor then a Cloudflare address, so two trus
   assert.equal(ipBucket(clientIp({ xForwardedFor: "2001:db8:abcd:12:aaaa:bbbb:cccc:dddd, 172.71.150.57", remoteAddress: "10.0.0.1", trustedHops: 2 })), "2001:0db8:abcd:0012::/64", "an IPv6 visitor is counted by their /64");
   // If the header is shorter than expected, fall back to the connection itself, never to a made-up value.
   assert.equal(clientIp({ xForwardedFor: "172.71.150.57", remoteAddress: "10.230.1.1", trustedHops: 2 }), "10.230.1.1");
+});
+
+test("the run deadline is 2 minutes by default, can be set, and cannot be set too small to be useful", () => {
+  assert.equal(DEFAULT_LIMITS.runDeadlineSeconds, 120);
+  assert.equal(limitsFromEnv({ LIMIT_RUN_SECONDS: "45" }).runDeadlineSeconds, 45);
+  assert.equal(limitsFromEnv({ LIMIT_RUN_SECONDS: "" }).runDeadlineSeconds, 120, "empty means the default");
+  for (const bad of ["5", "9", "abc", "-1", "1.5", "0"]) {
+    assert.throws(() => limitsFromEnv({ LIMIT_RUN_SECONDS: bad }), /LIMIT_RUN_SECONDS must be a whole number of at least 10/, bad);
+  }
 });
 

@@ -24,6 +24,8 @@ export interface Limits {
   dailyBudgetUsd: number;
   /** The most tokens one run may use before it is stopped. */
   runTokenCap: number;
+  /** Most seconds one shopper run may take before it stops with what it has. */
+  runDeadlineSeconds: number;
   /** How many proxies sit in front of the app. See net.ts. */
   trustedProxyHops: number;
 }
@@ -39,6 +41,7 @@ export const DEFAULT_LIMITS: Limits = {
   globalRunsPerDay: 300,
   dailyBudgetUsd: 5,
   runTokenCap: 250_000,
+  runDeadlineSeconds: 120,
   trustedProxyHops: 0,
 };
 
@@ -71,6 +74,7 @@ export function limitsFromEnv(env: Record<string, string | undefined> = process.
     globalRunsPerDay: wholeNumber(env, "LIMIT_GLOBAL_RUNS_PER_DAY", d.globalRunsPerDay, 1),
     dailyBudgetUsd: budget === undefined || budget === "" ? d.dailyBudgetUsd : Number(budget),
     runTokenCap: wholeNumber(env, "LIMIT_RUN_TOKEN_CAP", d.runTokenCap, 1000),
+    runDeadlineSeconds: wholeNumber(env, "LIMIT_RUN_SECONDS", d.runDeadlineSeconds, 10),
     trustedProxyHops: wholeNumber(env, "TRUSTED_PROXY_HOPS", d.trustedProxyHops, 0),
   };
 }

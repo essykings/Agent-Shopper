@@ -31,7 +31,7 @@ export async function guardedProposeAndBuy(
   });
   let actual: number | null = null;
   try {
-    const result = await proposeAndBuy(pool, { ...deps, modelName: model, maxTotalTokens: deps.limits.runTokenCap }, input);
+    const result = await proposeAndBuy(pool, { ...deps, modelName: model, maxTotalTokens: deps.limits.runTokenCap, deadlineMs: Math.round(deps.limits.runDeadlineSeconds * 1000) }, input);
     actual = costMicroUsd(model, result.run.usage);
     return result;
   } finally {

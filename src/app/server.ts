@@ -65,8 +65,9 @@ let model: ModelPort;
 if (mock) {
   model = createMockModel({ delayMs: 900 });
 } else {
-  const client = new Anthropic();
-  model = (params) => client.messages.create(params);
+  // No call may hang: 60 seconds each, and one retry for a passing network or overload error. The whole run has its own deadline too.
+  const client = new Anthropic({ timeout: 60_000, maxRetries: 1 });
+  model = (params, opts) => client.messages.create(params, opts?.signal ? { signal: opts.signal } : undefined);
 }
 
 const api = createApi(pool, {

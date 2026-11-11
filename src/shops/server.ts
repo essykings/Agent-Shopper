@@ -19,7 +19,8 @@ if (!databaseUrl) {
 const pool = createPool(databaseUrl);
 await waitForDatabase(pool, { log: console.log });
 await migrate(pool);
-await seedShops(pool, process.env.SHOP_PAYEE_EMAIL ?? "shops@example.com");
+// A shop service that was not given SHOP_PAYEE_EMAIL must not replace the one the app set.
+await seedShops(pool, process.env.SHOP_PAYEE_EMAIL?.trim() || null);
 
 const shopId = process.env.SHOP_ID;
 const local = process.env.SHOPS_LOCAL === "1";

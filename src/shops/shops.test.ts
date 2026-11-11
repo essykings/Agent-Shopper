@@ -413,3 +413,34 @@ test("a shop's search page lists matching products with their real totals", asyn
   const evil = await (await app.request("/search?q=%3Cscript%3Ealert(1)%3C/script%3E")).text();
   assert.ok(!evil.includes("<script>alert(1)"), "the search words are escaped");
 });
+
+test("seeding without a payout email never overwrites the real one, and a new shop starts on a placeholder", { skip }, async () => {
+  const email = async (p: Pool = pool) => (await p.query("select payout_email as e from shops where id = 'northgear'")).rows[0].e as string;
+  try {
+    await seedShops(pool, "real@shop.example");
+    await seedShops(pool, null);
+    assert.equal(await email(), "real@shop.example", "a shop service with no email setting does not replace it");
+    await seedShops(pool, "other@shop.example");
+    assert.equal(await email(), "other@shop.example", "a given email still replaces the old one");
+    assert.equal((await pool.query("select count(*)::int as n from shops")).rows[0].n, 3);
+    const fresh = `t_${randomBytes(6).toString("hex")}`;
+    await admin!.query(`create schema ${fresh}`);
+    const p2 = createPool(url!, fresh);
+    try {
+      await migrate(p2);
+      await seedShops(p2, null);
+      const rows = (await p2.query("select id, payout_email from shops order by id")).rows;
+      assert.deepEqual(rows.map((r) => r.payout_email), ["shops@example.com", "shops@example.com", "shops@example.com"]);
+      await seedShops(p2, "real@shop.example");
+      assert.equal(await email(p2), "real@shop.example", "the app, starting after the shops, sets the real one");
+      await seedShops(p2, null);
+      assert.equal(await email(p2), "real@shop.example", "and a shop restarting later leaves it alone");
+    } finally {
+      await p2.end();
+      await admin!.query(`drop schema ${fresh} cascade`);
+    }
+  } finally {
+    await seedShops(pool, "shop@example.com");
+  }
+});
+

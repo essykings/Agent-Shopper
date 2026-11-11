@@ -14,7 +14,7 @@ import type { FetchedPage, PageFetcher, ParsedAbout } from "./pages.ts";
 import { scoreSeller } from "./seller.ts";
 import type { AgentStore } from "./store.ts";
 
-export type ModelPort = (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
+export type ModelPort = (params: Anthropic.MessageCreateParamsNonStreaming, opts?: { signal?: AbortSignal }) => Promise<Anthropic.Message>;
 /** What the guard needs besides the shop's current price, which the agent reads itself. */
 export type GuardFacts = Omit<GuardContext, "currentTotalCents">;
 
@@ -36,6 +36,8 @@ export interface ShopperDeps {
   maxSteps?: number;
   /** Most tokens (input and output, over every turn) before the agent is stopped. Caps what one run can cost. */
   maxTotalTokens?: number;
+  /** Most milliseconds one whole run may take. When it passes, the run stops with what it has (gift ideas already accepted are kept). */
+  deadlineMs?: number;
   /** Told about each step as it happens, for the live screens. A failing listener never stops the run. */
   onEvent?: Emit;
 }
@@ -72,6 +74,7 @@ export type ShopperOutcome =
   | { status: "refused" }
   | { status: "step_limit" }
   | { status: "token_limit" }
+  | { status: "time_limit" }
   | { status: "no_decision"; message: string };
 
 export interface ShopperRun {
@@ -239,6 +242,9 @@ interface ToolOut {
 const ok = (content: unknown): ToolOut => ({ ok: true, content });
 const fail = (message: string): ToolOut => ({ ok: false, content: { error: message } });
 
+/** Raised inside a run when the deadline passes while it is waiting for the model. */
+class DeadlineError extends Error {}
+
 export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): Promise<ShopperRun> {
   const { mandate, shops } = input;
   const now = (): Date => (deps.now ?? (() => new Date()))();
@@ -246,6 +252,10 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
   const maxSteps = deps.maxSteps ?? (gift ? 22 : 14);
   const runId = randomUUID();
   const picks: Pick[] = [];
+  // The run's own clock is the real one (deps.now is the shop's calendar, which tests fix).
+  const startedAt = Date.now();
+  const deadlineMs = deps.deadlineMs && deps.deadlineMs > 0 ? deps.deadlineMs : undefined;
+  const deadlineAt = deadlineMs ? startedAt + deadlineMs : Infinity;
 
   const pages = new Map<string, FetchedPage & { shopId: string | null }>();
   const aboutCache = new Map<string, ParsedAbout>();
@@ -257,16 +267,17 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
   let steps = 0;
 
   /** Tells the model how much room is left, so it settles on candidates instead of searching until it runs out. */
-  const budget = (): { turns_left: number; budget_used_percent?: number; advice?: string } => {
+  const budget = (): { turns_left: number; seconds_left?: number; budget_used_percent?: number; advice?: string } => {
     const turnsLeft = Math.max(0, maxSteps - steps);
     const used = deps.maxTotalTokens ? Math.min(100, Math.round(((usage.inputTokens + usage.outputTokens) / deps.maxTotalTokens) * 100)) : undefined;
+    const timeLeft = deadlineMs ? Math.max(0, deadlineAt - Date.now()) / deadlineMs : undefined;
     const advice =
-      turnsLeft <= 4 || (used !== undefined && used >= 75)
+      turnsLeft <= 4 || (used !== undefined && used >= 75) || (timeLeft !== undefined && timeLeft <= 0.25)
         ? "You are almost out of room. Propose now with what you have, then finish."
-        : (used !== undefined && used >= 45) || turnsLeft <= Math.floor(maxSteps / 2)
+        : (used !== undefined && used >= 45) || turnsLeft <= Math.floor(maxSteps / 2) || (timeLeft !== undefined && timeLeft <= 0.5)
           ? "You have used about half your room. Stop searching, open the product pages of your best candidates, and propose."
           : undefined;
-    return { turns_left: turnsLeft, ...(used !== undefined ? { budget_used_percent: used } : {}), ...(advice ? { advice } : {}) };
+    return { turns_left: turnsLeft, ...(deadlineMs ? { seconds_left: Math.round(Math.max(0, deadlineAt - Date.now()) / 1000) } : {}), ...(used !== undefined ? { budget_used_percent: used } : {}), ...(advice ? { advice } : {}) };
   };
 
   const emit: Emit = (e) => {
@@ -484,15 +495,35 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
   ];
 
   while (steps < maxSteps) {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) return { outcome: partial({ status: "time_limit" }), actions, rejections, usage, steps };
     steps++;
-    const res = await deps.model({
-      model: deps.modelName ?? DEFAULT_MODEL,
-      max_tokens: 16000,
-      system,
-      tools,
-      messages,
-      output_config: { effort: deps.effort ?? "medium" },
-    });
+    // The model is told to stop at the deadline, and the run does not wait for it either way: a model that ignores the
+    // signal (or a network that never answers) still cannot hold the run past its time.
+    const stop = new AbortController();
+    const timer = Number.isFinite(remainingMs) ? setTimeout(() => stop.abort(), remainingMs) : undefined;
+    let res: Anthropic.Message;
+    try {
+      res = await Promise.race([
+        deps.model(
+          {
+            model: deps.modelName ?? DEFAULT_MODEL,
+            max_tokens: 16000,
+            system,
+            tools,
+            messages,
+            output_config: { effort: deps.effort ?? "medium" },
+          },
+          { signal: stop.signal },
+        ),
+        new Promise<never>((_resolve, reject) => stop.signal.addEventListener("abort", () => reject(new DeadlineError()), { once: true })),
+      ]);
+    } catch (err) {
+      if (stop.signal.aborted) return { outcome: partial({ status: "time_limit" }), actions, rejections, usage, steps };
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     usage.inputTokens += res.usage.input_tokens;
     usage.outputTokens += res.usage.output_tokens;
     // Thinking blocks must go back exactly as received, so the whole content is kept.
@@ -513,6 +544,7 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of res.content) {
       if (block.type !== "tool_use") continue;
+      if (!outcome && Date.now() >= deadlineAt) return { outcome: partial({ status: "time_limit" }), actions, rejections, usage, steps };
       const args = rec(block.input);
       let out: ToolOut;
       try {
