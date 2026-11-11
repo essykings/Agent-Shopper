@@ -84,7 +84,7 @@ The model is scripted in tests, so they check everything around it: the tools, t
 DIAG_TOKEN=... CONTROL_TOKEN=... node scripts/cloud-check.ts https://<app>.onrender.com --control https://<control>.onrender.com
 ```
 
-**Going live** is adding settings in the Render dashboard (the app's Environment tab), then redeploying: `MOCK_SERVICES` removed, plus `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `DEMO_VAULT_ID`, `SHOP_PAYEE_EMAIL` (also on the three shops), and `PAYPAL_WEBHOOK_ID` once a webhook pointing at `https://<app>/api/paypal/webhook` exists in the PayPal developer dashboard. Set `TRUSTED_PROXY_HOPS` from what the cloud check reports, or every visitor shares one daily limit.
+**Going live** is adding settings in the Render dashboard (the app's Environment tab), then redeploying: `MOCK_SERVICES` removed, plus `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `DEMO_VAULT_ID`, `SHOP_PAYEE_EMAIL` (also on the three shops), and `PAYPAL_WEBHOOK_ID` once a webhook pointing at `https://<app>/api/paypal/webhook` exists in the PayPal developer dashboard. `TRUSTED_PROXY_HOPS` is set to 2 in `render.yaml`, which is what the cloud check measured on Render (the header arrives as the visitor's address followed by a Cloudflare address). Re-run the check if you move hosts, or every visitor could share one daily limit.
 
 ## Known limits and things not yet verified
 

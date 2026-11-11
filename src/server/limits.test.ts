@@ -417,3 +417,17 @@ test("with the off switch on, the public entry points do nothing", { skip }, asy
   assert.equal(model.calls, 0);
   assert.equal(await count(), 0);
 });
+
+test("on Render the header is the visitor then a Cloudflare address, so two trusted proxies finds the visitor", () => {
+  // Measured on the deployed app (scripts/cloud-check.ts): "<visitor>, <Cloudflare edge>".
+  const seen = "203.0.113.45, 172.71.150.57";
+  assert.equal(clientIp({ xForwardedFor: seen, remoteAddress: "10.230.1.1", trustedHops: 2 }), "203.0.113.45", "two proxies: the visitor");
+  assert.equal(clientIp({ xForwardedFor: seen, remoteAddress: "10.230.1.1", trustedHops: 1 }), "172.71.150.57", "one proxy would count every visitor as the Cloudflare address");
+  // A visitor cannot pick their own address by sending the header themselves: whatever they send comes before the real one.
+  const forged = "9.9.9.9, 8.8.8.8, 203.0.113.45, 172.71.150.57";
+  assert.equal(clientIp({ xForwardedFor: forged, remoteAddress: "10.230.1.1", trustedHops: 2 }), "203.0.113.45");
+  assert.equal(ipBucket(clientIp({ xForwardedFor: "2001:db8:abcd:12:aaaa:bbbb:cccc:dddd, 172.71.150.57", remoteAddress: "10.0.0.1", trustedHops: 2 })), "2001:0db8:abcd:0012::/64", "an IPv6 visitor is counted by their /64");
+  // If the header is shorter than expected, fall back to the connection itself, never to a made-up value.
+  assert.equal(clientIp({ xForwardedFor: "172.71.150.57", remoteAddress: "10.230.1.1", trustedHops: 2 }), "10.230.1.1");
+});
+

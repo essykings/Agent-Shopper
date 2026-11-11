@@ -47,10 +47,11 @@ services:
           property: connectionString
       - key: SESSION_SECRET
         generateValue: true
-      # How many proxies sit in front of the app. Render's own count is not in its documentation, so 1 is a first
-      # guess and `scripts/cloud-check.ts` measures the real value. Until it is right every visitor shares one limit.
+      # How many proxies sit in front of the app. Measured with scripts/cloud-check.ts on 2026-11-11: Render's header
+      # arrives as "<visitor>, <a Cloudflare address>", so 2 picks the visitor. With 1 every visitor would be counted
+      # as a Cloudflare address and share one daily limit. Re-run the check if Render's setup ever changes.
       - key: TRUSTED_PROXY_HOPS
-        value: "1"
+        value: "2"
       # Lets scripts/cloud-check.ts ask the app what address it sees. Read it in the dashboard (Environment) to run the check.
       - key: DIAG_TOKEN
         generateValue: true
