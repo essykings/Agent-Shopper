@@ -1,0 +1,13 @@
+# Secrets and local settings. Never commit these.
+.env
+.env.*
+!.env.example
+
+# Installed and built files
+node_modules/
+web/dist/
+
+# Logs and editor leftovers
+*.log
+.DS_Store
+.claude/settings.local.json

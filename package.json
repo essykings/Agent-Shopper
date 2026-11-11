@@ -1,0 +1,45 @@
+{
+  "name": "agent-shopper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.22.1 <25"
+  },
+  "scripts": {
+    "test": "node --env-file-if-exists=.env --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "shops": "node --env-file=.env src/shops/server.ts",
+    "buy-live": "node --env-file=.env scripts/buy-live.ts",
+    "shopper-live": "node --env-file=.env scripts/shopper-live.ts",
+    "app": "node --env-file=.env src/app/server.ts",
+    "web:dev": "vite --config web/vite.config.ts",
+    "web:build": "vite build --config web/vite.config.ts",
+    "web:typecheck": "tsc -p web/tsconfig.json --noEmit",
+    "app:mock": "MOCK_SERVICES=1 node --env-file=.env src/app/server.ts",
+    "shops:local": "SHOPS_LOCAL=1 node --env-file=.env src/shops/server.ts",
+    "payee-test": "node --env-file=.env scripts/payee-test.ts",
+    "partner-probe": "node --env-file=.env scripts/partner-probe.ts",
+    "partner-charge": "node --env-file=.env scripts/partner-charge.ts",
+    "payout-test": "node --env-file=.env scripts/payout-test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "@hono/node-server": "^2.1.7",
+    "ag-grid-community": "^36.3.0",
+    "ag-grid-react": "^36.3.0",
+    "hono": "^4.13.18",
+    "pg": "^8.23.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  }
+}
