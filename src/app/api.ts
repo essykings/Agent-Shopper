@@ -518,6 +518,12 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     });
   });
 
+  // How many shoppers are working right now. Public and cheap: a number and nothing else.
+  app.get("/api/town/status", (c) => {
+    c.header("Cache-Control", "no-store");
+    return c.json({ shoppingNow: hub.activeRuns() });
+  });
+
   // Everyone's runs, anonymous. No sign-in needed, so it is limited per address and in total.
   app.get("/api/town", (c) => {
     const ip = ipBucket(ipOf(c) ?? "unknown");

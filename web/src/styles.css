@@ -12,7 +12,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:22px;text-decoration:none}
 .lg{width:38px;height:38px;border-radius:12px;background:var(--yellow);border:2px solid var(--ink);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800}
 .links{display:flex;flex-wrap:wrap;gap:6px}
-.links a{padding:9px 16px;border-radius:22px;font-size:15px;font-weight:600;text-decoration:none}
+.links a{padding:9px 12px;border-radius:22px;font-size:15px;font-weight:600;text-decoration:none}
 .links a.on{background:var(--ink);color:var(--yellow)}
 .navr{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .intro{display:flex;flex-wrap:wrap;gap:32px;align-items:flex-end;justify-content:space-between}
@@ -110,3 +110,28 @@ button:disabled{opacity:.55;cursor:not-allowed}
 @keyframes fly{0%{transform:translate(var(--x0),var(--y0)) scale(.8);opacity:0}15%{opacity:1}100%{transform:translate(var(--x1),var(--y1)) scale(1);opacity:1}}
 @keyframes blink{0%,94%,100%{transform:scaleY(1)}97%{transform:scaleY(.1)}}
 @media (prefers-reduced-motion:reduce){.agent{transition:none}.coin{animation:none;opacity:1;transform:translate(var(--x1),var(--y1))}.bot i{animation:none}}
+/* "Needs you" bar: the one thing waiting, under the menu */
+.needs{display:flex;flex-wrap:wrap;align-items:center;gap:12px 16px;background:#fff;border:2px solid var(--ink);border-radius:20px;padding:12px 16px;box-shadow:4px 4px 0 var(--ink)}
+.needs.n-warn{background:var(--warn-bg)}.needs.n-ok{background:var(--ok-bg)}.needs.n-bad{background:var(--bad-bg)}
+.needs b{font-size:16px;font-weight:700}
+.pulse{width:14px;height:14px;border-radius:50%;border:2px solid var(--ink);background:var(--yellow);flex:none}
+.pulse.on{animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.35)}}
+.live{display:inline-flex;align-items:center;gap:5px;margin-left:6px;font-size:12px;font-weight:800}
+.live i{width:9px;height:9px;border-radius:50%;background:#3FAE6A;border:1.5px solid currentColor;animation:pulse 1.6s ease-in-out infinite}
+.linkbtn{background:none;border:0;padding:6px 4px;font:inherit;font-size:14px;font-weight:700;text-decoration:underline;color:var(--ink)}
+/* "Get started" checklist */
+.gsteps{list-style:none;margin:16px 0 0;padding:0}
+.gsteps li{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:14px 0;border-bottom:2px solid var(--line)}
+.gsteps li:last-child{border-bottom:0}
+.gnum{width:34px;height:34px;border-radius:50%;border:2px solid var(--ink);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;flex:none;background:#fff}
+.gsteps li.done .gnum{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
+.gsteps li.done b{color:var(--muted)}
+.gsteps li.now{background:var(--cream);margin:0 -12px;padding-left:12px;padding-right:12px;border-radius:14px;border-bottom-color:transparent}
+.gsteps li.now .gnum{background:var(--yellow)}
+/* The small map: the real scene scaled down, with its words hidden */
+.miniwrap{position:relative;overflow:hidden;border:2px solid var(--ink);border-radius:16px;background:var(--cream);width:100%}
+.mini{position:absolute;left:0;top:0;width:1000px;height:540px;transform-origin:top left;pointer-events:none}
+.mini .townwrap{border:0;border-radius:0;overflow:visible;background:transparent}
+.mini .bubble,.mini .aname,.mini .bld .s,.mini .bld b,.mini .bld .dot,.mini .chip2,.mini .ribbon,.mini .emptytown{display:none}
+@media (prefers-reduced-motion:reduce){.pulse.on,.live i{animation:none}}

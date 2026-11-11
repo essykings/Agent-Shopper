@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { ApiError, api, money } from "./api";
 import type { Me, RequestRow, RunResult, Shop } from "./api";
+import { Guide } from "./Guide";
+import { MiniTown } from "./MiniTown";
+import { CHANGED } from "./needs";
 import { Busy, Intro, Note, Pill, letter, useLoad } from "./ui";
+import type { CaseRow } from "./api";
 
 export function summarize(r: RunResult): { tone: "ok" | "warn" | "err"; text: string } {
   if (r.stage === "shortlist") {
@@ -13,6 +17,7 @@ export function summarize(r: RunResult): { tone: "ok" | "warn" | "err"; text: st
     const o = r.outcome ?? { status: "" };
     if (o.status === "gave_up") return { tone: "warn", text: `Nothing fit your rules. ${o.reason ?? ""}` };
     if (o.status === "refused") return { tone: "err", text: "The shopper declined this request." };
+    if (o.status === "time_limit") return { tone: "warn", text: "The shopper ran out of time before deciding. Nothing was bought. Try again in a moment." };
     if (o.status === "step_limit" || o.status === "token_limit") return { tone: "warn", text: "The shopper ran out of effort before deciding. Nothing was bought." };
     return { tone: "warn", text: o.message || "The shopper did not reach a decision. Nothing was bought." };
   }
@@ -49,6 +54,7 @@ export function RunPanel({ run }: { run: RunResult }) {
 export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; onNew: () => void }) {
   const requests = useLoad(() => api<{ requests: RequestRow[] }>("GET", "/api/requests"));
   const shops = useLoad(() => api<{ shops: Shop[] }>("GET", "/api/shops"));
+  const cases = useLoad(() => api<{ cases: CaseRow[] }>("GET", "/api/cases"));
   const [running, setRunning] = useState<string | null>(null);
   const [runs, setRuns] = useState<Record<string, RunResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -66,6 +72,7 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
     setRunning(null);
     requests.reload();
     refreshMe();
+    window.dispatchEvent(new Event(CHANGED));
   }
 
   async function cancel(id: string) {
@@ -76,6 +83,7 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
     }
     requests.reload();
     refreshMe();
+    window.dispatchEvent(new Event(CHANGED));
   }
 
   const list = requests.data?.requests ?? [];
@@ -121,6 +129,15 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
               <Note tone="warn">No PayPal account is connected, so your shopper can look but not buy. <a href="#/wallet"><b>Connect one on the Wallet page</b></a></Note>
             </div>
           )}
+          <div className="cols" style={{ alignItems: "flex-start", marginBottom: 32 }}>
+            <Guide requests={list} cases={cases.data?.cases ?? []} onNew={onNew} />
+            <section className="card" style={{ flex: "1 1 380px", maxWidth: 520, minWidth: 0 }}>
+              <h2 className="h2">Watch the town</h2>
+              <p className="s" style={{ margin: "4px 0 14px" }}>Your shopper walks between the shops, the guard and PayPal. This is the same map as the Town page.</p>
+              <MiniTown />
+              <a className="btn2 sm" href="#/town" style={{ marginTop: 14 }}>Open the Town</a>
+            </section>
+          </div>
           <section className="card">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <h2 className="h2">Your requests</h2>
@@ -132,29 +149,45 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
             )}
             <div style={{ marginTop: 8 }}>
               {list.map((r) => {
-                const waiting = r.status === "active" && r.proposal?.decision === "ask" && !r.order;
+                const ideas = r.kind === "gift" ? r.proposals.length : 0;
+                const approval = r.kind === "item" && r.proposal?.decision === "ask" ? r.proposal : null;
+                const open = r.status === "active" && !r.order;
+                const waiting = open && (ideas > 0 || approval !== null);
                 const busy = running === r.id;
+                const status =
+                  r.status === "fulfilled" ? (
+                    <>Bought{r.order ? ` ${money(r.order.total_cents)}` : ""}. <a href="#/orders"><b>See the order</b></a></>
+                  ) : r.status === "cancelled" ? (
+                    "Cancelled. The money set aside is free again."
+                  ) : waiting && ideas > 0 ? (
+                    `Waiting for you: your shopper found ${ideas} gift idea${ideas === 1 ? "" : "s"}.`
+                  ) : waiting && approval ? (
+                    `Waiting for your OK: ${approval.itemName ?? approval.item_key} for ${money(approval.total_cents)} from ${approval.shopName ?? approval.shop_id}.`
+                  ) : (
+                    "Ready. Press Run shopper to send it to the shops."
+                  );
                 return (
                   <div className="item" key={r.id}>
                     <div className="mono">{r.kind === "gift" ? "🎁" : letter(r.item)}</div>
                     <div className="grow">
                       <div className="t">{r.item}</div>
                       <div className="s">{r.kind === "gift" ? `Gift · ${r.goal?.interests ? `likes ${r.goal.interests} · ` : ""}` : ""}Up to {money(r.maxPriceCents)} · by {r.deadline} · shops scoring {r.sellerMinScore}+</div>
+                      <div className={waiting ? "t" : "s"} style={{ marginTop: 4 }}>{status}</div>
                     </div>
-                    {r.status === "fulfilled" && <Pill tone="ok">Bought {r.order ? money(r.order.total_cents) : ""}</Pill>}
+                    {r.status === "fulfilled" && <Pill tone="ok">Bought</Pill>}
                     {r.status === "cancelled" && <Pill tone="bad">Cancelled</Pill>}
-                    {waiting && <Pill tone="warn">{r.kind === "gift" ? "Choose a gift" : "Needs your OK"}</Pill>}
-                    {r.status === "active" && !waiting && <Pill tone="warn">Ready</Pill>}
-                    <div className="row">
-                      {waiting && <a className="btn sm" href={`#/approve/${r.id}`}>{r.kind === "gift" ? `Choose (${r.proposals.length})` : "Review"}</a>}
-                      {r.status === "active" && (
-                        <button className="btn2 sm" disabled={busy || me.paused || running !== null || me.payment.source === "none"} onClick={() => run(r.id)}>
+                    {waiting && <Pill tone="warn">Waiting for you</Pill>}
+                    {open && !waiting && <Pill tone="warn">Ready</Pill>}
+                    <div className="row" style={{ alignItems: "center" }}>
+                      {waiting && <a className="btn sm" href={`#/approve/${r.id}`}>{ideas > 0 ? (ideas === 1 ? "See the idea" : `See the ${ideas} ideas`) : "Review and approve"}</a>}
+                      {open && !waiting && (
+                        <button className="btn sm" disabled={busy || me.paused || running !== null || me.payment.source === "none"} onClick={() => run(r.id)}>
                           {busy ? <Busy>Shopping…</Busy> : "Run shopper"}
                         </button>
                       )}
-                      {r.status === "active" && <button className="btn2 sm" disabled={busy} onClick={() => cancel(r.id)}>Cancel</button>}
+                      {open && <button className="linkbtn" disabled={busy} onClick={() => cancel(r.id)}>Cancel request</button>}
                     </div>
-                    {busy && <div style={{ flexBasis: "100%" }}><Note>The shopper is looking at the shops. This takes about 20 seconds.</Note></div>}
+                    {busy && <div style={{ flexBasis: "100%" }}><Note>The shopper is looking at the shops. This takes about 20 seconds. <a href="#/town"><b>Watch it in the Town</b></a></Note></div>}
                     {errors[r.id] && <div style={{ flexBasis: "100%" }}><Note tone="err">{errors[r.id]}</Note></div>}
                     {runs[r.id] && <RunPanel run={runs[r.id]!} />}
                   </div>

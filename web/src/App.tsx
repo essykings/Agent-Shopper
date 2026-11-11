@@ -6,6 +6,9 @@ import { Home } from "./Home";
 import { NewRequest } from "./NewRequest";
 import { Orders } from "./Orders";
 import { Playground, PublicTown, TownSquare } from "./Town";
+import { markVisited, setGuideHidden } from "./Guide";
+import { MiniTown } from "./MiniTown";
+import { CHANGED, NeedsBar, useNeeds } from "./needs";
 import { Shops } from "./Shops";
 import { Wallet } from "./Wallet";
 import { Busy, Intro, Note } from "./ui";
@@ -53,6 +56,10 @@ function Landing({ onDone }: { onDone: (problem?: string) => void }) {
         sub="An AI agent browses the shops, avoids the traps, and buys with PayPal. Your rules decide whether any money moves, not the AI."
         panel={
           <div className="panel">
+            <div style={{ marginBottom: 20 }}>
+              <MiniTown />
+              <a href="#/town" style={{ display: "inline-block", marginTop: 8, fontWeight: 700, fontSize: 15 }}>Open the Town, no sign-in needed →</a>
+            </div>
             <span className="tag">Try it</span>
             <p style={{ margin: "14px 0 18px", fontSize: 16, lineHeight: 1.5 }}>
               You get a demo account with a $500 allowance and three pretend shops: an honest one, a scam one, and a flexible one. Payments use the PayPal sandbox, so no real money moves.
@@ -64,7 +71,6 @@ function Landing({ onDone }: { onDone: (problem?: string) => void }) {
             <button className="btn2" onClick={() => start(true)} disabled={working !== null} style={{ width: "100%", marginTop: 16 }}>
               {working === "own" ? <Busy>Opening PayPal…</Busy> : "Use my own sandbox account"}
             </button>
-            <p style={{ margin: "18px 0 0", fontSize: 15 }}><a href="#/town" style={{ fontWeight: 700 }}>Watch shoppers live, no sign-in needed →</a></p>
             <p className="s" style={{ margin: "10px 0 0" }}>
               For people with a PayPal developer account. You sign in on PayPal's own page with your sandbox login. We never see your password.
             </p>
@@ -94,11 +100,14 @@ export function App() {
     return code ? (CONNECT_NOTES[code] ?? null) : null;
   });
   const route = useRoute();
+  const needs = useNeeds(me);
+  const [shopping, setShopping] = useState(0);
 
   const refreshMe = useCallback(async () => {
     try {
       setMe(await api<Me>("GET", "/api/me"));
       setLoadError(null);
+      window.dispatchEvent(new Event(CHANGED));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) setMe(null);
       else setLoadError(err instanceof ApiError ? err.message : "Could not reach the server.");
@@ -110,6 +119,35 @@ export function App() {
     // Remove "?connect=..." from the address once it has been read.
     if (window.location.search) window.history.replaceState(null, "", window.location.pathname + window.location.hash);
   }, [refreshMe]);
+
+  // The tab title carries the number of things waiting, so it can be noticed from another tab.
+  useEffect(() => {
+    document.title = me && needs.badge > 0 ? `(${needs.badge}) Agent Shopper` : "Agent Shopper";
+  }, [me, needs.badge]);
+  // Remember which pages were opened, for the checklist.
+  useEffect(() => {
+    if (me) markVisited(route);
+  }, [me, route]);
+  // How many shoppers are working right now, for the dot beside "Town".
+  useEffect(() => {
+    if (!me) return;
+    let live = true;
+    const look = async () => {
+      if (document.hidden) return;
+      try {
+        const r = await api<{ shoppingNow: number }>("GET", "/api/town/status");
+        if (live) setShopping(r.shoppingNow);
+      } catch {
+        // The dot just stays as it was.
+      }
+    };
+    void look();
+    const t = window.setInterval(() => void look(), 20_000);
+    return () => {
+      live = false;
+      window.clearInterval(t);
+    };
+  }, [me]);
 
   if (!checked) return <div className="banner">Loading…</div>;
   if (loadError) return <div className="body"><Note tone="err">{loadError}</Note></div>;
@@ -139,14 +177,16 @@ export function App() {
       <div style={{ background: "#FDD05A", padding: "20px clamp(16px,4vw,64px) 0" }}>
         <header className="nav wrap">
           <a className="logo" href="#/"><span className="lg">A</span>Agent Shopper</a>
-          <nav className="links" aria-label="Main">{link("#/", "Home", "home")}{link("#/playground", "Playground", "playground")}{link("#/town", "Town", "town")}{link("#/shops", "Shops", "shops")}{link("#/wallet", "Wallet", "wallet")}{link("#/orders", "Orders", "orders")}</nav>
+          <nav className="links" aria-label="Main">{link("#/", "Home", "home")}{link("#/playground", "Playground", "playground")}<a href="#/town" className={page === "town" && !approve ? "on" : ""} aria-current={page === "town" && !approve ? "page" : undefined}>Town{shopping > 0 && <span className="live" aria-label={`${shopping} shopper${shopping === 1 ? "" : "s"} working now`}><i aria-hidden="true" />{shopping}</span>}</a>{link("#/shops", "Shops", "shops")}{link("#/wallet", "Wallet", "wallet")}{link("#/orders", "Orders", "orders")}</nav>
           <div className="navr">
             <button className="btn sm" onClick={() => setShowNew(true)}>New request</button>
+            <button className="btn2 sm" title="How it works" aria-label="How it works" onClick={() => { setGuideHidden(false); window.location.hash = "#/"; window.scrollTo({ top: 0 }); }}>?</button>
             <button className="btn2 sm" onClick={togglePause}>{me.paused ? "Resume" : "Pause all"}</button>
             <button className="btn2 sm" onClick={signOut}>Sign out</button>
           </div>
         </header>
       </div>
+      <NeedsBar items={needs.items} route={route || "#/"} onResume={togglePause} />
       {note && (
         <div className="wrap" style={{ padding: "20px clamp(16px,4vw,64px) 0" }}>
           <Note tone={note.tone}>{note.text} <button className="btn2 sm" style={{ marginLeft: 8 }} onClick={() => setNote(null)}>Dismiss</button></Note>

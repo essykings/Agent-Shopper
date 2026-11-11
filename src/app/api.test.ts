@@ -1247,3 +1247,87 @@ test("the diagnostic shows what the app sees, and what each possible TRUSTED_PRO
   assert.deepEqual([bare.xForwardedFor, bare.entriesInHeader], [null, 0]);
 });
 
+// ---------- a shopper run that hangs ----------
+
+test("a shopper run that hangs is stopped at its deadline, tells the owner plainly, charges nothing, and frees the slot", { skip }, async () => {
+  const hang: ModelPort = () => new Promise(() => undefined);
+  const h = harness({ model: hang, limits: { runDeadlineSeconds: 0.2 } });
+  const { b, fake } = await signedIn(h);
+  const { json: created } = await b.post("/api/requests", earbuds());
+  const started = Date.now();
+  const run = await b.post(`/api/requests/${created.id}/run`);
+  assert.equal(run.status, 200);
+  assert.deepEqual([run.json.stage, run.json.outcome.status], ["agent", "time_limit"]);
+  assert.ok(Date.now() - started < 3000, `answered after ${Date.now() - started} ms`);
+  assert.equal(fake.calls.length, 0, "nothing was charged");
+  assert.equal((await b.get("/api/orders")).json.orders.length, 0);
+  assert.equal((await b.post(`/api/requests/${created.id}/run`)).status, 200, "the run slot is free again, so the owner can try again straight away");
+});
+
+// ---------- bringing people to the Town: how many are shopping, and replaying your own run first ----------
+
+test("the Town says how many shoppers are working now, as a bare number, and it falls back to zero when runs end or are lost", () => {
+  const hub = new Hub();
+  assert.equal(hub.activeRuns(), 0);
+  const a = hub.start("u1");
+  const b = hub.start("u2");
+  a.emit({ type: "start" });
+  assert.equal(hub.activeRuns(), 1, "a run counts once it has started, not before");
+  b.emit({ type: "start", item: "a private thing" });
+  a.emit({ type: "visit", shopId: "northgear", page: "home", label: "Home page" });
+  assert.equal(hub.activeRuns(), 2, "more events from the same run do not count again");
+  a.emit({ type: "end", result: "bought" });
+  assert.equal(hub.activeRuns(), 1);
+  // A run whose end was never reported (a crash, a restart) stops counting after five minutes.
+  assert.equal(hub.activeRuns(Date.now() + 4 * 60_000), 1);
+  assert.equal(hub.activeRuns(Date.now() + 6 * 60_000), 0);
+  b.emit({ type: "end", result: "stopped" });
+  assert.equal(hub.activeRuns(), 0);
+});
+
+test("the status endpoint is public, shows only a number, and is never cached", { skip }, async () => {
+  const hub = new Hub();
+  const { api } = harness({ hub });
+  const res = await api.request("/api/town/status");
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await res.json(), { shoppingNow: 0 });
+  const run = hub.start("someone-else");
+  run.emit({ type: "start", item: "my secret birthday gift" });
+  const busy = await (await api.request("/api/town/status")).text();
+  assert.deepEqual(JSON.parse(busy), { shoppingNow: 1 });
+  assert.equal(busy.includes("secret"), false, "nothing about who or what");
+  run.emit({ type: "end", result: "nothing" });
+  assert.deepEqual(await (await api.request("/api/town/status")).json(), { shoppingNow: 0 });
+});
+
+test("when someone opens the Town, their own latest run is replayed first, even if many newer runs belong to others", () => {
+  const hub = new Hub();
+  const mineRun = hub.start("me");
+  mineRun.emit({ type: "start" });
+  mineRun.emit({ type: "end", result: "bought" });
+  for (let i = 0; i < 7; i++) {
+    const other = hub.start(`other${i}`);
+    other.emit({ type: "start" });
+    other.emit({ type: "end", result: "nothing" });
+  }
+  const runsOf = (feeds: Feed[]) => [...new Set(feeds.map((f) => f.runId))];
+  const forStranger = runsOf(hub.replay(null));
+  assert.equal(forStranger.length, 5);
+  assert.ok(!forStranger.includes(mineRun.runId), "a stranger sees the five newest, which are not mine");
+  const forMe = hub.replay("me");
+  const order = runsOf(forMe);
+  assert.equal(order.length, 5, "still five runs, not six");
+  assert.equal(order[0], mineRun.runId, "mine comes first");
+  assert.ok(forMe.filter((f) => f.runId === mineRun.runId).every((f) => f.mine === true && f.replay === true));
+  assert.ok(forMe.filter((f) => f.runId !== mineRun.runId).every((f) => f.mine === undefined));
+  // If my latest run is already among the newest five, it still moves to the front without being repeated.
+  const second = hub.start("me");
+  second.emit({ type: "start" });
+  second.emit({ type: "end", result: "bought" });
+  const again = runsOf(hub.replay("me"));
+  assert.equal(again[0], second.runId, "my newest run, not my older one");
+  assert.equal(again.length, new Set(again).size, "no run twice");
+  assert.equal(again.length, 5);
+});
+

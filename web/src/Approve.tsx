@@ -41,6 +41,21 @@ export function Approve({ id, refreshMe }: { id: string; refreshMe: () => void }
     refreshMe();
   }
 
+  /** Asks the shopper to look again. The new ideas replace the ones on this page. */
+  async function findMore() {
+    setWorking("more");
+    setMessage(null);
+    try {
+      await api("POST", `/api/requests/${id}/run`, {});
+      setMessage({ tone: "ok", text: "Your shopper looked again. The ideas below are the new ones." });
+    } catch (err) {
+      setMessage({ tone: "err", text: err instanceof ApiError ? err.message : "Something went wrong." });
+    }
+    setWorking(null);
+    requests.reload();
+    refreshMe();
+  }
+
   async function decline() {
     try {
       await api("POST", `/api/requests/${id}/cancel`, {});
@@ -90,7 +105,8 @@ export function Approve({ id, refreshMe }: { id: string; refreshMe: () => void }
             </div>
             {picks.length > 0 && (
               <div className="row">
-                <button className="btn2" disabled={working !== null || done} onClick={decline}>None of these, cancel the request</button>
+                <button className="btn2" disabled={working !== null || done} onClick={findMore}>{working === "more" ? <Busy>Looking again…</Busy> : "Find different ideas"}</button>
+                <button className="linkbtn" disabled={working !== null || done} onClick={decline}>None of these, cancel the request</button>
                 <span className="s" style={{ alignSelf: "center" }}>Paid with the sandbox PayPal, so no real money moves.</span>
               </div>
             )}

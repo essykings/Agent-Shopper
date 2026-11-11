@@ -14,7 +14,7 @@ import type { AgentView, Place, Tone, World } from "../../src/shared/world.ts";
 type Status = "connecting" | "live" | "busy" | "offline";
 
 /** Listens to a live stream and returns what the map should show now. Pauses while the tab is hidden. */
-function useLive(url: string): { world: World; status: Status; idle: boolean } {
+export function useLive(url: string): { world: World; status: Status; idle: boolean } {
   const player = useRef(new Player());
   const [world, setWorld] = useState<World>(player.current.world);
   const [idle, setIdle] = useState(true);
@@ -87,7 +87,7 @@ function Agent({ a, x, y }: { a: AgentView; x: number; y: number }) {
   );
 }
 
-function Scene({ world, homeLabel, empty }: { world: World; homeLabel: string; empty: string }) {
+export function Scene({ world, homeLabel, empty, compact = false }: { world: World; homeLabel: string; empty: string; compact?: boolean }) {
   const agents = useMemo(() => {
     const list = Object.values(world.agents).sort((a, b) => a.runId.localeCompare(b.runId));
     const seen = new Map<string, number>();
@@ -106,7 +106,7 @@ function Scene({ world, homeLabel, empty }: { world: World; homeLabel: string; e
   const gate = world.gateFlash;
 
   return (
-    <div className="townwrap">
+    <div className={`townwrap${compact ? " compact" : ""}`}>
       <div className="town" role="img" aria-label="A map of three shops, the guard's gate and PayPal. Shopping agents walk between them. The list below says what is happening.">
         <svg className="roads" viewBox="0 0 1000 540" aria-hidden="true">
           <g fill="none" stroke="#EADFD6" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round">
@@ -156,7 +156,7 @@ function Scene({ world, homeLabel, empty }: { world: World; homeLabel: string; e
         )}
 
         {agents.map(({ a, x, y }) => <Agent key={a.runId} a={a} x={x} y={y} />)}
-        {agents.length === 0 && <div className="emptytown">{empty}</div>}
+        {!compact && agents.length === 0 && <div className="emptytown">{empty}</div>}
       </div>
     </div>
   );
@@ -285,7 +285,20 @@ export function Playground({ me, refreshMe }: { me: Me; refreshMe: () => void })
 // ---------- the public Town square ----------
 
 export function TownSquare({ signedIn }: { signedIn: boolean }) {
-  const { world, status } = useLive("/api/town");
+  // Changing the number after the "?" opens the stream again, which replays the runs: the owner's own latest first.
+  const [again, setAgain] = useState(0);
+  const { world, status } = useLive(`/api/town?again=${again}`);
+  const [copied, setCopied] = useState<"idle" | "yes" | "no">("idle");
+  const link = `${window.location.origin}/#/town`;
+  async function share() {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied("yes");
+    } catch {
+      setCopied("no");
+    }
+    window.setTimeout(() => setCopied("idle"), 5000);
+  }
   const replaying = Object.values(world.agents).some((a) => a.replay);
   const sample = Object.values(world.agents).some((a) => a.sample);
   const mine = Object.values(world.agents).some((a) => a.mine);
@@ -307,7 +320,19 @@ export function TownSquare({ signedIn }: { signedIn: boolean }) {
                     : "These are real runs, happening now."}
               </p>
               {mine && <p className="s" style={{ margin: "0 0 14px" }}>Your agent has a ring around it and says "You". Only you can tell which one it is.</p>}
-              <a className="btn" style={{ width: "100%" }} href="#/">{signedIn ? "Go to my shopper" : "Try it yourself"}</a>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <a className="btn" href="#/">{signedIn ? "Go to my shopper" : "Try it yourself"}</a>
+                {signedIn && <button className="btn2" onClick={() => setAgain((n) => n + 1)}>Watch my last run again</button>}
+                <button className="btn2" onClick={share}>{copied === "yes" ? "Link copied" : "Share the Town"}</button>
+                {signedIn && <a className="s" href="#/playground" style={{ fontWeight: 700 }}>See the private details in the Playground</a>}
+              </div>
+              {copied === "no" && (
+                <div className="field" style={{ margin: "12px 0 0" }}>
+                  <label htmlFor="town-link">Copy this link</label>
+                  <input id="town-link" readOnly value={link} onFocus={(e) => e.currentTarget.select()} />
+                </div>
+              )}
+              <p className="s" style={{ margin: "12px 0 0" }}>Anyone can open this page, with no sign-in.</p>
             </div>
           }
         />

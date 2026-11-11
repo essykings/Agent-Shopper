@@ -10,6 +10,8 @@ import type { Emit, Feed, WorldEvent } from "../shared/events.ts";
 type Listener = (f: Feed) => void;
 
 const KEEP_RUNS = 20;
+/** A run that never reported its end (a crash, a restart) stops counting as "shopping now" after this long. */
+const ACTIVE_FOR_MS = 5 * 60_000;
 const KEEP_EVENTS_PER_RUN = 80;
 
 /** A scripted example, shown only until a real run exists. It is always marked as an example. */
@@ -39,6 +41,8 @@ export class Hub {
   private pub = new Map<Listener, string | null>();
   private recent: Array<{ runId: string; owner: string; events: Feed[] }> = [];
   private perIp = new Map<string, number>();
+  /** Runs that have started and not ended: run id to when it started. Only a count is ever shown. */
+  private active = new Map<string, number>();
 
   /** The emitter one run uses. Events go to the owner in full and to everyone else without private text. */
   start(userId: string): { runId: string; emit: Emit } {
@@ -46,6 +50,8 @@ export class Hub {
     const agent = agentName(runId);
     const emit: Emit = (event) => {
       const at = Date.now();
+      if (event.type === "start") this.active.set(runId, at);
+      else if (event.type === "end") this.active.delete(runId);
       for (const l of this.priv.get(userId) ?? []) l({ runId, agent, at, mine: true, event });
       const safe: Feed = { runId, agent, at, event: toPublic(event) };
       let run = this.recent.find((r) => r.runId === runId);
@@ -87,11 +93,21 @@ export class Hub {
     return this.pub.size;
   }
 
+  /** How many shoppers are working right now, for the "live" dot. Only a number: nothing about who. */
+  activeRuns(now: number = Date.now()): number {
+    for (const [id, startedAt] of this.active) if (now - startedAt >= ACTIVE_FOR_MS) this.active.delete(id);
+    return this.active.size;
+  }
+
   /** Earlier runs to play again when someone opens the Town square: real ones, or the example if there are none. */
   replay(viewer: string | null = null): Feed[] {
     if (this.recent.length === 0) {
       return SAMPLE.map((event, i) => ({ runId: "sample", agent: "Agent 000", at: i, sample: true, replay: true, event }));
     }
-    return this.recent.slice(-5).flatMap((r) => r.events.map((f) => ({ ...f, replay: true, ...(viewer !== null && r.owner === viewer ? { mine: true } : {}) })));
+    // The five newest runs, except that the viewer's own latest run always comes first, so it is the one they see replayed.
+    let runs = this.recent.slice(-5);
+    const mine = viewer === null ? undefined : [...this.recent].reverse().find((r) => r.owner === viewer);
+    if (mine) runs = [mine, ...runs.filter((r) => r !== mine).slice(-4)];
+    return runs.flatMap((r) => r.events.map((f) => ({ ...f, replay: true, ...(viewer !== null && r.owner === viewer ? { mine: true } : {}) })));
   }
 }
