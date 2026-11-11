@@ -3,6 +3,8 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
+// The gift tests below need gift requests switched on. A separate test checks they are off by default.
+process.env["ENABLE_GIFTS"] = "1";
 import { createPageFetcher } from "../agent/pages.ts";
 import type { ModelPort, ShopRef } from "../agent/shopper.ts";
 import { createPool, migrate } from "../server/db.ts";
@@ -161,14 +163,14 @@ test("signing in as a demo creates an account with an allowance and the shops al
   assert.equal(me.json.mock, true);
   assert.deepEqual(me.json.payment, { source: "demo", email: null });
   const shops = (await b.get("/api/shops")).json.shops;
-  assert.deepEqual(shops.map((s: any) => s.status), ["allowed", "allowed", "allowed"]);
+  assert.deepEqual(shops.map((s: any) => s.id), ["northgear", "deal-zone", "trailhead"]);
   assert.ok((await b.get("/api/ledger")).json.entries.some((e: any) => e.kind === "allowance_set" && e.amountCents === 50000));
 });
 
 test("nothing works without a valid sign-in", { skip }, async () => {
   const h = harness();
   const anon = browser(h.api);
-  for (const [m, p] of [["GET", "/api/me"], ["GET", "/api/shops"], ["GET", "/api/requests"], ["GET", "/api/ledger"], ["GET", "/api/orders"], ["POST", "/api/requests"], ["POST", "/api/requests/x/run"], ["POST", "/api/pause"], ["PUT", "/api/shops/northgear"]] as const) {
+  for (const [m, p] of [["GET", "/api/me"], ["GET", "/api/shops"], ["GET", "/api/requests"], ["GET", "/api/ledger"], ["GET", "/api/orders"], ["POST", "/api/requests"], ["POST", "/api/requests/x/run"], ["POST", "/api/pause"]] as const) {
     assert.equal((await anon.call(m, p, m === "GET" ? undefined : {})).status, 401, `${m} ${p}`);
   }
   const { b } = await signedIn(h);
@@ -256,6 +258,65 @@ test("an allowed request goes all the way: the cheap scam listing is refused, th
   assert.equal((await b.post(`/api/requests/${created.id}/run`)).status, 409, "a fulfilled request cannot be run again");
 });
 
+test("a request needs only what to buy and how much; everything else has a default, and gifts are off unless switched on", { skip }, async () => {
+  const { b } = await signedIn();
+  const made = await b.post("/api/requests", { kind: "item", item: "Wireless earbuds", maxPriceCents: 10000 });
+  assert.equal(made.status, 201);
+  const row = (await b.get("/api/requests")).json.requests.find((r: any) => r.id === made.json.id);
+  assert.equal(row.maxPriceCents, 10000);
+  assert.equal(row.askAboveCents, 10000, "the price is the only limit, so there is nothing separate to ask above");
+  assert.equal(row.sellerMinScore, 70);
+  assert.equal(row.condition, "new");
+  assert.deepEqual(row.neverBuy, ["gift cards", "crypto", "alcohol"]);
+  const days = (Date.parse(`${row.deadline}T00:00:00Z`) - Date.now()) / 86_400_000;
+  assert.ok(days > 28 && days < 31, `deadline is about 30 days away, got ${days}`);
+  const run = await b.post(`/api/requests/${made.json.id}/run`);
+  assert.equal(run.json.stage, "purchase", "within the price it buys without asking");
+  assert.equal(run.json.result.status, "paid_out");
+
+  process.env["ENABLE_GIFTS"] = "";
+  try {
+    const gift = await b.post("/api/requests", giftRequest());
+    assert.equal(gift.status, 400);
+    assert.match(gift.json.error, /not available/i);
+  } finally {
+    process.env["ENABLE_GIFTS"] = "1";
+  }
+});
+
+test("a wordy request still finds the product, and an item no shop sells is tried three ways before the shopper gives up", { skip }, async () => {
+  const { b } = await signedIn();
+  const wordy = await b.post("/api/requests", { kind: "item", item: "Water bottle for hiking", maxPriceCents: 3500 });
+  const bought = await b.post(`/api/requests/${wordy.json.id}/run`);
+  assert.equal(bought.json.stage, "purchase", "the closest match is found even though no listing says hiking");
+  assert.equal(bought.json.result.status, "paid_out");
+
+  const nothing = await b.post("/api/requests", { kind: "item", item: "Unicorn saddle", maxPriceCents: 10000 });
+  const run = await b.post(`/api/requests/${nothing.json.id}/run`);
+  assert.equal(run.json.stage, "agent");
+  assert.equal(run.json.outcome.status, "gave_up");
+  assert.ok(run.json.outcome.tried.length >= 3, `tried ${JSON.stringify(run.json.outcome.tried)}`);
+  assert.equal(run.json.outcome.tried[0], "unicorn saddle");
+  const searched = (run.json.actions as Array<{ summary: string }>).filter((a) => /search\?/.test(a.summary));
+  assert.ok(searched.length >= 9, `three tries in each of three shops, got ${searched.length}`);
+  assert.equal((await b.get("/api/requests")).json.requests.find((r: any) => r.id === nothing.json.id).status, "active", "nothing bought, nothing charged, still open");
+});
+
+test("each shop comes with an address a browser can open: the public one if there is one, otherwise the one the app uses", { skip }, async () => {
+  const { b } = await signedIn();
+  const shops = (await b.get("/api/shops")).json.shops as Array<{ id: string; url: string }>;
+  assert.deepEqual(shops.map((s) => [s.id, s.url]), REFS.map((r) => [r.id, r.baseUrl]));
+
+  const h = harness();
+  h.deps.shopLinks = { northgear: "https://agent-shopper-northgear.example" };
+  const api2 = createApi(pool, h.deps);
+  const b2 = browser(api2, "203.0.113.77");
+  assert.equal((await b2.login()).status, 200);
+  const shops2 = (await b2.get("/api/shops")).json.shops as Array<{ id: string; url: string }>;
+  assert.equal(shops2.find((s) => s.id === "northgear")!.url, "https://agent-shopper-northgear.example", "the public address wins");
+  assert.equal(shops2.find((s) => s.id === "trailhead")!.url, REFS.find((r) => r.id === "trailhead")!.baseUrl, "and a shop without one falls back");
+});
+
 test("above the ask-me limit the owner must approve the exact amount they saw", { skip }, async () => {
   const { b, fake } = await signedIn();
   const { json: created } = await b.post("/api/requests", earbuds({ askAboveCents: 4000 }));
@@ -317,26 +378,16 @@ test("cancelling a request gives its set-aside back, once", { skip }, async () =
   assert.ok((await b.get("/api/ledger")).json.entries.some((e: any) => e.kind === "set_aside_release" && e.amountCents === 10000));
 });
 
-test("the shop list shows scores and facts, and the owner's choices are enforced", { skip }, async () => {
-  const { b, fake } = await signedIn();
+test("the shop list shows scores and facts, and there is no per-person allow or block to change", { skip }, async () => {
+  const { b } = await signedIn();
   const shops = (await b.get("/api/shops")).json.shops;
   const by = (id: string) => shops.find((s: any) => s.id === id);
   assert.ok(by("northgear").score >= 85);
   assert.equal(by("deal-zone").score, 0);
   assert.ok(by("deal-zone").findings.some((f: string) => /days old/.test(f)));
   assert.ok(by("northgear").categories.includes("electronics"));
-
-  assert.equal((await b.put("/api/shops/northgear", { status: "nonsense" })).status, 400);
-  assert.equal((await b.put("/api/shops/nowhere", { status: "allowed" })).status, 404);
-  assert.equal((await b.put("/api/shops/northgear", { status: "blocked" })).json.status, "blocked");
-  assert.equal((await b.put("/api/shops/deal-zone", { status: "blocked" })).status, 200);
-  assert.equal(by((await b.get("/api/shops")).json.shops.find((s: any) => s.id === "northgear").id).id, "northgear");
-  assert.equal((await b.get("/api/shops")).json.shops.find((s: any) => s.id === "northgear").status, "blocked");
-
-  const { json: created } = await b.post("/api/requests", earbuds());
-  const run = await b.post(`/api/requests/${created.id}/run`);
-  assert.equal(run.json.stage, "agent", "both shops blocked, so nothing can be bought");
-  assert.deepEqual(fake.calls, []);
+  assert.ok(shops.every((s: any) => !("status" in s)), "no allow, ask or block choice is offered");
+  assert.equal((await b.put("/api/shops/northgear", { status: "blocked" })).status, 404, "and it cannot be changed");
 });
 
 test("one person can never see or act on another person's requests, orders or money", { skip }, async () => {
@@ -618,10 +669,8 @@ test("the hub shows everyone an anonymous version of each event, and the owner t
   assert.equal(mine.length, 3, "another person's run never reaches me");
 });
 
-test("the Town square limits viewers per address and in total, and replays real runs or an example", () => {
+test("the Town square limits viewers per address and in total", () => {
   const hub = new Hub();
-  assert.equal(hub.replay().every((f) => f.sample && f.replay), true, "an example when nothing has run");
-  assert.ok(hub.replay().length > 5);
   const a = hub.onPublic("1.1.1.1", () => {}, { perIp: 2, total: 3 });
   const b = hub.onPublic("1.1.1.1", () => {}, { perIp: 2, total: 3 });
   assert.ok(a && b);
@@ -630,11 +679,6 @@ test("the Town square limits viewers per address and in total, and replays real 
   assert.equal(hub.onPublic("3.3.3.3", () => {}, { perIp: 2, total: 3 }), null, "total reached");
   a!();
   assert.ok(hub.onPublic("1.1.1.1", () => {}, { perIp: 2, total: 4 }), "room again after one leaves");
-  const run = hub.start("u1");
-  run.emit({ type: "start" });
-  run.emit({ type: "end", result: "nothing" });
-  assert.deepEqual(hub.replay().map((f) => f.event.type), ["start", "end"]);
-  assert.equal(hub.replay().every((f) => f.replay && !f.sample), true);
 });
 
 test("a run reports each step live: searches, seller checks, the guard turning the scam down, payment, and the end", { skip }, async () => {
@@ -665,7 +709,7 @@ test("a run reports each step live: searches, seller checks, the guard turning t
   const searches = live.map((f) => f.event).filter((e) => e.type === "visit" && e.page === "search");
   assert.ok(searches.length >= 3 && searches.every((e) => e.type === "visit" && e.label === ""), "search words are not shown to everyone");
   assert.ok(mine.feeds.some((f) => f.event.type === "visit" && f.event.page === "search" && f.event.label === "wireless earbuds"), "but the owner sees them");
-  assert.ok(town.feeds.slice(0, 3).every((f) => f.sample), "the example played first, before any real run");
+  assert.ok(town.feeds.every((f) => !f.replay && !f.sample), "the Town shows only live runs: no replays and no scripted example");
 });
 
 test("the live feed for your own runs needs a sign-in, and the public one is limited per address", { skip }, async () => {
@@ -684,7 +728,7 @@ test("the live feed for your own runs needs a sign-in, and the public one is lim
   for (const l of [...open, fifth]) await l.close();
 });
 
-test("a signed-in viewer's own agents are marked for them alone, in live steps and in replays", { skip }, async () => {
+test("a signed-in viewer's own agents are marked for them alone", { skip }, async () => {
   const h = harness();
   const a = await signedIn(h);
   const other = await signedIn(h, "198.51.100.40");
@@ -701,19 +745,11 @@ test("a signed-in viewer's own agents are marked for them alone, in live steps a
   assert.ok(live(watchOther).every((f) => f.mine === undefined), "another signed-in person does not");
   assert.ok(live(watchAnon).every((f) => f.mine === undefined), "nor does someone who is not signed in");
   for (const w of [watchA, watchOther, watchAnon]) await w.close();
-
-  // Opening the square later replays the run, and still marks it only for its owner.
-  const replayOf = async (headers: Record<string, string>) => {
-    const w = listen(await h.api.request("/api/town", { headers }));
-    await until(() => w.names.includes("ready"));
-    await w.close();
-    return w.feeds.filter((f) => f.replay && f.runId !== "sample");
-  };
-  const mineAgain = await replayOf({ cookie: a.b.cookie, "x-test-ip": "198.51.100.44" });
-  assert.ok(mineAgain.length > 5 && mineAgain.every((f) => f.mine === true));
-  const othersAgain = await replayOf({ cookie: other.b.cookie, "x-test-ip": "198.51.100.45" });
-  assert.ok(othersAgain.length > 5 && othersAgain.every((f) => f.mine === undefined));
-  assert.ok((await replayOf({ "x-test-ip": "198.51.100.46" })).every((f) => f.mine === undefined));
+  // Opening the square later shows nothing from the past: only runs that happen while someone is watching.
+  const late = listen(await h.api.request("/api/town", { headers: { cookie: a.b.cookie, "x-test-ip": "198.51.100.44" } }));
+  await until(() => late.names.includes("ready"));
+  await late.close();
+  assert.equal(late.feeds.length, 0, "no replay of the earlier run");
 });
 
 // ---------- gifts ----------
@@ -1291,43 +1327,48 @@ test("the status endpoint is public, shows only a number, and is never cached", 
   const res = await api.request("/api/town/status");
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await res.json(), { shoppingNow: 0 });
+  assert.deepEqual(await res.json(), { shoppingNow: 0, finishedToday: 0 });
   const run = hub.start("someone-else");
   run.emit({ type: "start", item: "my secret birthday gift" });
   const busy = await (await api.request("/api/town/status")).text();
-  assert.deepEqual(JSON.parse(busy), { shoppingNow: 1 });
+  assert.deepEqual(JSON.parse(busy), { shoppingNow: 1, finishedToday: 0 });
   assert.equal(busy.includes("secret"), false, "nothing about who or what");
   run.emit({ type: "end", result: "nothing" });
-  assert.deepEqual(await (await api.request("/api/town/status")).json(), { shoppingNow: 0 });
+  assert.deepEqual(await (await api.request("/api/town/status")).json(), { shoppingNow: 0, finishedToday: 1 }, "a finished run is counted for today");
 });
 
-test("when someone opens the Town, their own latest run is replayed first, even if many newer runs belong to others", () => {
+test("finished tasks are counted for today, in total and for one person, and not carried into tomorrow", () => {
   const hub = new Hub();
-  const mineRun = hub.start("me");
-  mineRun.emit({ type: "start" });
-  mineRun.emit({ type: "end", result: "bought" });
-  for (let i = 0; i < 7; i++) {
-    const other = hub.start(`other${i}`);
-    other.emit({ type: "start" });
-    other.emit({ type: "end", result: "nothing" });
-  }
-  const runsOf = (feeds: Feed[]) => [...new Set(feeds.map((f) => f.runId))];
-  const forStranger = runsOf(hub.replay(null));
-  assert.equal(forStranger.length, 5);
-  assert.ok(!forStranger.includes(mineRun.runId), "a stranger sees the five newest, which are not mine");
-  const forMe = hub.replay("me");
-  const order = runsOf(forMe);
-  assert.equal(order.length, 5, "still five runs, not six");
-  assert.equal(order[0], mineRun.runId, "mine comes first");
-  assert.ok(forMe.filter((f) => f.runId === mineRun.runId).every((f) => f.mine === true && f.replay === true));
-  assert.ok(forMe.filter((f) => f.runId !== mineRun.runId).every((f) => f.mine === undefined));
-  // If my latest run is already among the newest five, it still moves to the front without being repeated.
-  const second = hub.start("me");
-  second.emit({ type: "start" });
-  second.emit({ type: "end", result: "bought" });
-  const again = runsOf(hub.replay("me"));
-  assert.equal(again[0], second.runId, "my newest run, not my older one");
-  assert.equal(again.length, new Set(again).size, "no run twice");
-  assert.equal(again.length, 5);
+  const noon = Date.UTC(2027, 0, 10, 12, 0, 0);
+  const finish = (owner: string, result: "bought" | "nothing" = "bought") => {
+    const r = hub.start(owner);
+    r.emit({ type: "start" });
+    r.emit({ type: "end", result });
+  };
+  assert.equal(hub.finishedToday(undefined, noon), 0);
+  finish("me");
+  finish("me", "nothing");
+  finish("other");
+  const now = Date.now();
+  assert.equal(hub.finishedToday(undefined, now), 3, "every run that ended counts, bought or not");
+  assert.equal(hub.finishedToday("me", now), 2);
+  assert.equal(hub.finishedToday("other", now), 1);
+  assert.equal(hub.finishedToday("nobody", now), 0);
+  assert.equal(hub.finishedToday(undefined, now + 86_400_000), 0, "tomorrow starts again at zero");
+  // A run that is still going, or that never started, is not a finished task.
+  hub.start("me").emit({ type: "start" });
+  hub.start("me").emit({ type: "end", result: "stopped" });
+  assert.equal(hub.finishedToday(undefined, now), 3);
 });
 
+test("the status endpoint gives a signed-in person their own count, and nobody else's", { skip }, async () => {
+  const h = harness();
+  const a = await signedIn(h);
+  const other = await signedIn(h, "198.51.100.60");
+  const { json: created } = await a.b.post("/api/requests", earbuds());
+  assert.equal((await a.b.post(`/api/requests/${created.id}/run`)).status, 200);
+  const status = async (cookie?: string) => (await h.api.request("/api/town/status", cookie ? { headers: { cookie } } : {})).json();
+  assert.deepEqual(await status(a.b.cookie), { shoppingNow: 0, finishedToday: 1, mineToday: 1 });
+  assert.deepEqual(await status(other.b.cookie), { shoppingNow: 0, finishedToday: 1, mineToday: 0 });
+  assert.deepEqual(await status(), { shoppingNow: 0, finishedToday: 1 }, "a stranger gets only the total");
+});

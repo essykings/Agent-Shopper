@@ -6,7 +6,7 @@ a{color:inherit}
 button{font:inherit;cursor:pointer}
 button:disabled{opacity:.55;cursor:not-allowed}
 .banner{background:var(--ink);color:var(--yellow);text-align:center;padding:8px 16px;font-size:14px;font-weight:600}
-.band{background:var(--yellow);padding:20px clamp(16px,4vw,64px) 40px;display:flex;flex-direction:column;gap:40px}
+.band{background:var(--yellow);padding:64px clamp(16px,4vw,64px) 64px;display:flex;flex-direction:column;gap:40px}
 .wrap{width:100%;max-width:1280px;margin:0 auto}
 .nav{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px 24px;background:#fff;border:2px solid var(--ink);border-radius:44px;padding:10px 10px 10px 16px}
 .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:22px;text-decoration:none}
@@ -15,14 +15,15 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .links a{padding:9px 12px;border-radius:22px;font-size:15px;font-weight:600;text-decoration:none}
 .links a.on{background:var(--ink);color:var(--yellow)}
 .navr{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.intro.mid{align-items:center}
 .intro{display:flex;flex-wrap:wrap;gap:32px;align-items:flex-end;justify-content:space-between}
 .h1{font-weight:800;font-size:clamp(40px,6vw,80px);line-height:1;letter-spacing:-.025em;margin:0}
 .sub{font-size:20px;line-height:1.4;margin:16px 0 0;max-width:540px}
 .lab{font-family:'DM Mono',ui-monospace,monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase}
 .panel{background:#fff;border:2px solid var(--ink);border-radius:28px;padding:22px;box-shadow:8px 8px 0 var(--ink);flex:0 1 440px;min-width:min(100%,300px)}
 .tag{font-family:'DM Mono',ui-monospace,monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;border:1.5px solid var(--ink);border-radius:14px;padding:4px 10px;display:inline-block}
-.fig{font-weight:800;font-size:44px;line-height:1;letter-spacing:-.02em}
-.figs{display:flex;flex-wrap:wrap;gap:8px 32px;margin-top:16px}
+.fig{font-weight:800;font-size:clamp(22px,2vw,28px);line-height:1;letter-spacing:-.02em}
+.figs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 22px;margin-top:16px}
 .btn{height:48px;padding:0 22px;border-radius:24px;background:var(--ink);color:var(--yellow);border:2px solid var(--ink);font-size:16px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;gap:8px}
 .btn2{height:48px;padding:0 22px;border-radius:24px;background:#fff;color:var(--ink);border:2px solid var(--ink);font-size:16px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;text-decoration:none}
 .btn.sm,.btn2.sm{height:40px;padding:0 16px;font-size:14px}
@@ -92,6 +93,10 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .bot::after{content:"";position:absolute;top:-17px;left:16px;width:8px;height:8px;border-radius:50%;background:var(--ink)}
 .bot i{width:8px;height:8px;border-radius:50%;background:var(--ink);display:block;animation:blink 4s infinite}
 .agent.replay .bot{border-style:dashed}
+.agent.idle{animation:bob 3s ease-in-out infinite}
+.agent.idle .bot{border-style:dashed}
+@keyframes bob{0%,100%{margin-top:0}50%{margin-top:-5px}}
+.tally{position:absolute;right:14px;bottom:12px;background:#fff;border:2px solid var(--ink);border-radius:20px;padding:6px 14px;font-size:13px;font-weight:700;box-shadow:2px 2px 0 var(--ink);z-index:6}
 .agent.mine .bot{box-shadow:0 0 0 4px #fff,0 0 0 7px var(--ink),3px 3px 0 7px var(--ink)}
 .agent.mine .aname{background:var(--ink);color:var(--yellow);padding:1px 8px;font-weight:700}
 .feed .who.me{background:var(--ink);color:var(--yellow);padding:1px 8px;border-radius:8px;font-weight:700}
@@ -109,7 +114,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .tdot.p-ok{background:#3FAE6A}.tdot.p-warn{background:var(--yellow)}.tdot.p-bad{background:#E5533D}
 @keyframes fly{0%{transform:translate(var(--x0),var(--y0)) scale(.8);opacity:0}15%{opacity:1}100%{transform:translate(var(--x1),var(--y1)) scale(1);opacity:1}}
 @keyframes blink{0%,94%,100%{transform:scaleY(1)}97%{transform:scaleY(.1)}}
-@media (prefers-reduced-motion:reduce){.agent{transition:none}.coin{animation:none;opacity:1;transform:translate(var(--x1),var(--y1))}.bot i{animation:none}}
+@media (prefers-reduced-motion:reduce){.agent{transition:none;animation:none}.coin{animation:none;opacity:1;transform:translate(var(--x1),var(--y1))}.bot i{animation:none}}
 /* "Needs you" bar: the one thing waiting, under the menu */
 .needs{display:flex;flex-wrap:wrap;align-items:center;gap:12px 16px;background:#fff;border:2px solid var(--ink);border-radius:20px;padding:12px 16px;box-shadow:4px 4px 0 var(--ink)}
 .needs.n-warn{background:var(--warn-bg)}.needs.n-ok{background:var(--ok-bg)}.needs.n-bad{background:var(--bad-bg)}
@@ -120,18 +125,10 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .live{display:inline-flex;align-items:center;gap:5px;margin-left:6px;font-size:12px;font-weight:800}
 .live i{width:9px;height:9px;border-radius:50%;background:#3FAE6A;border:1.5px solid currentColor;animation:pulse 1.6s ease-in-out infinite}
 .linkbtn{background:none;border:0;padding:6px 4px;font:inherit;font-size:14px;font-weight:700;text-decoration:underline;color:var(--ink)}
-/* "Get started" checklist */
-.gsteps{list-style:none;margin:16px 0 0;padding:0}
-.gsteps li{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:14px 0;border-bottom:2px solid var(--line)}
-.gsteps li:last-child{border-bottom:0}
-.gnum{width:34px;height:34px;border-radius:50%;border:2px solid var(--ink);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;flex:none;background:#fff}
-.gsteps li.done .gnum{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
-.gsteps li.done b{color:var(--muted)}
-.gsteps li.now{background:var(--cream);margin:0 -12px;padding-left:12px;padding-right:12px;border-radius:14px;border-bottom-color:transparent}
-.gsteps li.now .gnum{background:var(--yellow)}
 /* The small map: the real scene scaled down, with its words hidden */
 .miniwrap{position:relative;overflow:hidden;border:2px solid var(--ink);border-radius:16px;background:var(--cream);width:100%}
 .mini{position:absolute;left:0;top:0;width:1000px;height:540px;transform-origin:top left;pointer-events:none}
 .mini .townwrap{border:0;border-radius:0;overflow:visible;background:transparent}
 .mini .bubble,.mini .aname,.mini .bld .s,.mini .bld b,.mini .bld .dot,.mini .chip2,.mini .ribbon,.mini .emptytown{display:none}
 @media (prefers-reduced-motion:reduce){.pulse.on,.live i{animation:none}}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}

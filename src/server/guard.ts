@@ -34,13 +34,13 @@ export function evaluate(mandate: Mandate, proposal: Proposal, ctx: GuardContext
     add("price-valid", "The price is a real amount", "pass", `Total ${dollars(total)}.`);
   }
 
-  // 2. The shop is on your list.
+  // 2. The shop is one the app knows. (The shop's score, checked next, is what judges a shop.)
   if (ctx.sellerStatus === "allowed") {
-    add("shop-allowed", "The shop is on your list", "pass", "You allowed this shop.");
+    add("shop-allowed", "The shop is one we know", "pass", "It is one of the shops this app can buy from.");
   } else if (ctx.sellerStatus === "ask_every_time") {
-    add("shop-allowed", "The shop is on your list", "ask", "You asked to be asked every time for this shop.");
+    add("shop-allowed", "The shop is one we know", "ask", "This shop needs your OK every time.");
   } else {
-    add("shop-allowed", "The shop is on your list", "deny", "This shop is not on your allowed list.");
+    add("shop-allowed", "The shop is one we know", "deny", "This is not one of the shops this app can buy from.");
   }
 
   // 3. The shop's score.

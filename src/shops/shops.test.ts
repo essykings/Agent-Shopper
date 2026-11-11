@@ -7,7 +7,7 @@ import { createPool, migrate } from "../server/db.ts";
 import type { Pool } from "../server/db.ts";
 import { evaluate } from "../server/guard.ts";
 import type { GuardContext, Mandate, Proposal } from "../shared/types.ts";
-import { PRODUCTS_PER_SHOP, SHOPS, categoriesOf, findProduct, findShop, searchProducts } from "./catalog.ts";
+import { PRODUCTS_PER_SHOP, SHOPS, categoriesOf, findProduct, findShop, searchProducts, searchShop } from "./catalog.ts";
 import { PER_PAGE, arrivesOn, escapeHtml, money, pageText, priceNow, renderAbout, renderProduct, renderSearch, renderShopHome } from "./pages.ts";
 import { createShopApp } from "./shop-app.ts";
 import { createControlApp } from "./control-app.ts";
@@ -442,5 +442,21 @@ test("seeding without a payout email never overwrites the real one, and a new sh
   } finally {
     await seedShops(pool, "shop@example.com");
   }
+});
+
+test("a search that has extra words still finds the product: filler is ignored, and the closest matches are shown when nothing has every word", () => {
+  const trail = findShop("trailhead")!;
+  assert.deepEqual(searchProducts(trail, "water bottle for hiking").map((p) => p.key), [], "no listing has the word hiking in this combination");
+  const loose = searchShop(trail, "water bottle for hiking");
+  assert.equal(loose.exact, false);
+  assert.equal(loose.products[0]!.key, "water-bottle", "the best match comes first");
+  assert.ok(loose.products.every((p) => /water|bottle/i.test(`${p.name} ${p.blurb}`)), "everything shown matches at least half of the words");
+  assert.equal(searchShop(trail, "water bottle").exact, true, "an exact search stays exact");
+  assert.equal(searchShop(trail, "for the").exact, true, "only filler words means everything is shown, as an empty search does");
+  assert.equal(searchShop(trail, "unicorn saddle").products.length, 0, "nothing close means nothing, not junk");
+  assert.equal(searchShop(trail, "hiking").exact, true, "one word is never loosened");
+  const page = pageText(renderSearch(trail, "water bottle for hiking", undefined, loose.products, 0, NOW, { page: 1, sort: "relevance", closest: true }));
+  assert.match(page, /closest matches/);
+  assert.doesNotMatch(pageText(renderSearch(trail, "water bottle", undefined, searchShop(trail, "water bottle").products, 0, NOW, { page: 1, sort: "relevance" })), /closest matches/);
 });
 

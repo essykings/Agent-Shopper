@@ -59,7 +59,7 @@ export function Approve({ id, refreshMe }: { id: string; refreshMe: () => void }
   async function decline() {
     try {
       await api("POST", `/api/requests/${id}/cancel`, {});
-      setMessage({ tone: "ok", text: "Declined. The money you set aside is free again." });
+      setMessage({ tone: "ok", text: "Declined. The money held for it is back in your allowance." });
     } catch (err) {
       setMessage({ tone: "err", text: err instanceof ApiError ? err.message : "Could not decline." });
     }

@@ -12,6 +12,7 @@ import type { ShopRef, ShopperDeps, ShopperOutcome, ShopperRun, ModelPort } from
 import { dbStore } from "../agent/store.ts";
 import type { Emit, WorldEvent } from "../shared/events.ts";
 import type { Claim, Proposal, SellerStatus } from "../shared/types.ts";
+import { SHOPS } from "../shops/catalog.ts";
 import { receiveOrder } from "../shops/service.ts";
 import type { Pool } from "./db.ts";
 import { loadMandate, purchase } from "./payments.ts";
@@ -29,6 +30,8 @@ export interface BuyDeps {
   maxTotalTokens?: number;
   /** Most milliseconds one shopper run may take. */
   deadlineMs?: number;
+  /** Different searches the shopper must try before it may say it cannot find the item (default 3). */
+  minSearches?: number;
   /** Live steps for the Playground and the Town square. */
   onEvent?: Emit;
   now?: () => Date;
@@ -44,18 +47,9 @@ export type BuyResult =
   /** The proposal went to the payment service. */
   | { stage: "purchase"; proposalId: string; result: PurchaseResult; run: ShopperRun };
 
-/** A shop with no row counts as unknown, and unknown shops are refused. */
-export async function getSellerStatus(pool: Pool, userId: string, shopId: string): Promise<SellerStatus> {
-  const res = await pool.query<{ status: SellerStatus }>("select status from user_shops where user_id = $1 and shop_id = $2", [userId, shopId]);
-  return res.rows[0]?.status ?? "unknown";
-}
-
-export async function setShopStatus(pool: Pool, userId: string, shopId: string, status: Exclude<SellerStatus, "unknown">): Promise<void> {
-  await pool.query(
-    `insert into user_shops (user_id, shop_id, status) values ($1, $2, $3)
-     on conflict (user_id, shop_id) do update set status = excluded.status, updated_at = now()`,
-    [userId, shopId, status],
-  );
+/** Every shop the app knows is allowed, and any other address is unknown and refused. The shop's score is what judges a shop. */
+export function sellerStatusOf(shopId: string): SellerStatus {
+  return SHOPS.some((s) => s.id === shopId) ? "allowed" : "unknown";
 }
 
 interface StoredProposal {
@@ -103,7 +97,7 @@ function purchaseDeps(pool: Pool, deps: BuyDeps, url: string): PurchaseDeps {
         return null;
       }
     },
-    getSellerStatus: (userId, shopId) => getSellerStatus(pool, userId, shopId),
+    getSellerStatus: async (_userId, shopId) => sellerStatusOf(shopId),
     // The shop learns about the paid order, so it can ship (or misbehave, in the demo).
     afterCapture: async (info) => {
       await receiveOrder(pool, { orderId: info.orderId, shopId: info.shopId, itemKey: info.itemKey, now: now() });
@@ -172,7 +166,7 @@ export async function proposeAndBuy(
       getGuardFacts: dbGuardFacts(pool, {
         userId: input.userId,
         mandateId: input.mandateId,
-        getSellerStatus: (shopId) => getSellerStatus(pool, input.userId, shopId),
+        getSellerStatus: async (shopId) => sellerStatusOf(shopId),
         ...(deps.now ? { now: deps.now } : {}),
       }),
       ...(deps.now ? { now: deps.now } : {}),
@@ -181,6 +175,7 @@ export async function proposeAndBuy(
       ...(deps.maxSteps ? { maxSteps: deps.maxSteps } : {}),
       ...(deps.maxTotalTokens ? { maxTotalTokens: deps.maxTotalTokens } : {}),
       ...(deps.deadlineMs ? { deadlineMs: deps.deadlineMs } : {}),
+      ...(deps.minSearches !== undefined ? { minSearches: deps.minSearches } : {}),
       ...(deps.onEvent ? { onEvent: deps.onEvent } : {}),
     },
     { mandate, shops: input.shops },

@@ -1,11 +1,10 @@
-// What is waiting for the owner, on every page: the bar under the menu, the number in the tab title, and
-// the "working" state while the shopper is out. The deciding is done in src/shared/needs.ts (and tested there).
+// What is waiting for the owner, on every page: the bar under the menu and the number in the tab title.
+// The deciding is done in src/shared/needs.ts (and tested there).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { CaseRow, Me, RequestRow } from "./api";
-import type { Feed } from "../../src/shared/events.ts";
-import { badgeCount, needsYou, shortStep, visibleNeeds } from "../../src/shared/needs.ts";
+import { badgeCount, needsYou, visibleNeeds } from "../../src/shared/needs.ts";
 import type { NeedItem, NeedsInput } from "../../src/shared/needs.ts";
 
 /** Pages dispatch this after they change something, so the bar updates straight away instead of at the next check. */
@@ -13,8 +12,6 @@ export const CHANGED = "agent-shopper:changed";
 
 const POLL_MS = 20_000;
 const CHECK_MS = 180_000;
-/** A run that has gone quiet for this long is no longer shown as working. */
-const QUIET_MS = 3 * 60_000;
 
 function toRequests(list: RequestRow[]): NeedsInput["requests"] {
   return list.map((r) => ({
@@ -34,8 +31,6 @@ function toRequests(list: RequestRow[]): NeedsInput["requests"] {
 export function useNeeds(me: Me | null): { items: NeedItem[]; badge: number } {
   const [requests, setRequests] = useState<RequestRow[]>([]);
   const [cases, setCases] = useState<CaseRow[]>([]);
-  const [working, setWorking] = useState<{ startedAt: number; step: string; lastAt: number } | null>(null);
-  const [now, setNow] = useState(Date.now());
   const latest = useRef<RequestRow[]>([]);
   const signedIn = me !== null;
 
@@ -91,58 +86,11 @@ export function useNeeds(me: Me | null): { items: NeedItem[]; badge: number } {
     };
   }, [signedIn, reload]);
 
-  // The shopper at work, from the owner's own live stream, so it shows on any page and on any device.
-  useEffect(() => {
-    if (!signedIn) return;
-    let es: EventSource | null = null;
-    const connect = () => {
-      if (es || document.hidden) return;
-      const source = new EventSource("/api/live");
-      es = source;
-      source.onmessage = (m) => {
-        let feed: Feed;
-        try {
-          feed = JSON.parse(m.data) as Feed;
-        } catch {
-          return;
-        }
-        const e = feed.event;
-        if (e.type === "end") {
-          setWorking(null);
-          void reload();
-          return;
-        }
-        const step = shortStep(e);
-        setWorking((w) => ({ startedAt: w?.startedAt ?? (e.type === "start" ? feed.at : Date.now()), step, lastAt: Date.now() }));
-      };
-    };
-    const disconnect = () => {
-      es?.close();
-      es = null;
-    };
-    const onVisible = () => (document.hidden ? disconnect() : connect());
-    document.addEventListener("visibilitychange", onVisible);
-    connect();
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      disconnect();
-    };
-  }, [signedIn, reload]);
-
-  // A clock for the seconds counter, only while something is working.
-  useEffect(() => {
-    if (!working) return;
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
-  }, [working]);
-
-  const active = working && now - working.lastAt < QUIET_MS ? { step: working.step, seconds: Math.max(0, Math.round((now - working.startedAt) / 1000)) } : null;
   const items = needsYou({
     paused: me?.paused ?? false,
     paymentSource: me?.payment.source ?? "demo",
     requests: toRequests(requests),
     cases: cases.map((c) => ({ id: c.id, orderId: c.orderId, kind: c.kind, status: c.status, amountCents: c.amountCents, itemName: c.itemName, shopName: c.shopName })),
-    working: active,
   });
   return { items, badge: badgeCount(items) };
 }
@@ -156,7 +104,7 @@ export function NeedsBar({ items, route, onResume }: { items: NeedItem[]; route:
   return (
     <div className="wrap" style={{ padding: "16px clamp(16px,4vw,64px) 0" }}>
       <div className={`needs n-${first.tone}`} role="status" aria-live="polite">
-        <span className={`pulse${first.kind === "working" ? " on" : ""}`} aria-hidden="true" />
+        <span className="pulse" aria-hidden="true" />
         <div className="grow">
           <b>{first.text}</b>
           {first.sub && <div className="s">{first.sub}</div>}

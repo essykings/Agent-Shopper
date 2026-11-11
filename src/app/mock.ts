@@ -4,7 +4,8 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ModelPort } from "../agent/shopper.ts";
-import { SHOPS, searchProducts } from "../shops/catalog.ts";
+import { SHOPS, searchProducts, searchShop } from "../shops/catalog.ts";
+import { searchLadder } from "../shared/words.ts";
 
 type Params = Anthropic.MessageCreateParamsNonStreaming;
 type Block = Record<string, unknown>;
@@ -140,16 +141,41 @@ export function createMockModel(opts: { delayMs?: number } = {}): ModelPort {
     const first = params.messages[0]!.content;
     const item = (/Find this for me: (.+?)\. Start by/.exec(typeof first === "string" ? first : "")?.[1] ?? "").toLowerCase();
 
-    // Listings that match every word of the request (the same search the shops offer), cheapest first.
-    const candidates = shops
-      .flatMap((s) => {
+    // What was searched so far, in order. The first search that finds anything is the one to buy from.
+    const tried: string[] = [];
+    for (const m of params.messages) {
+      if (!Array.isArray(m.content)) continue;
+      for (const b of m.content) {
+        if (b.type !== "tool_use" || b.name !== "open_page") continue;
+        const u = new URL(String((b.input as { url?: string }).url));
+        if (u.pathname !== "/search") continue;
+        // A department listing is a try too, but it is only browsing: it never finds the item.
+        const q = u.searchParams.has("category") ? `dept:${u.searchParams.get("category")}` : (u.searchParams.get("q") ?? "").toLowerCase();
+        if (!tried.includes(q)) tried.push(q);
+      }
+    }
+    const listingsFor = (q: string) =>
+      shops.flatMap((s) => {
         const def = SHOPS.find((d) => d.id === s.id);
-        return (def ? searchProducts(def, item) : []).map((p) => ({ shop: s, product: p }));
-      })
-      .sort((a, b) => a.product.priceCents + a.product.shippingCents - (b.product.priceCents + b.product.shippingCents));
+        return (def ? searchShop(def, q).products : []).map((p) => ({ shop: s, product: p }));
+      });
+    const hitAt = tried.find((q) => !q.startsWith("dept:") && listingsFor(q).length > 0);
+
+    // Listings from that search (the same one the shops offer), cheapest first.
+    const candidates = (hitAt === undefined ? [] : listingsFor(hitAt)).sort(
+      (a, b) => a.product.priceCents + a.product.shippingCents - (b.product.priceCents + b.product.shippingCents),
+    );
 
     if (params.messages.length === 1) return reply(shops.map((s) => use("open_page", { url: `${s.baseUrl}/search?q=${encodeURIComponent(item)}` })));
-    if (candidates.length === 0) return reply([use("give_up", { reason: "I could not find that in these shops." })]);
+    if (candidates.length === 0) {
+      // Nothing yet: search again with simpler words, then browse departments, so at least three tries are made.
+      const more = [...searchLadder(item), "dept:electronics", "dept:sports"].find((q) => !tried.includes(q));
+      if (tried.length < 3 && more !== undefined) {
+        const param = more.startsWith("dept:") ? `category=${encodeURIComponent(more.slice(5))}` : `q=${encodeURIComponent(more)}`;
+        return reply(shops.map((s) => use("open_page", { url: `${s.baseUrl}/search?${param}` })));
+      }
+      return reply([use("give_up", { reason: "I could not find that in these shops." })]);
+    }
 
     // Read what happened so far: pages opened, and which proposals were turned down.
     const ids = new Map<string, string>(); // product page url -> snapshot id

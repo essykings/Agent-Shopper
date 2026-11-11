@@ -11,7 +11,7 @@ import { createShopApp } from "../shops/shop-app.ts";
 import { getShopOrder, seedShops, setPriceAdjust } from "../shops/service.ts";
 import { pageText } from "../shops/pages.ts";
 import { getBalances } from "./balances.ts";
-import { approveAndBuy, buyProposal, getSellerStatus, proposeAndBuy, setShopStatus } from "./buy.ts";
+import { approveAndBuy, buyProposal, proposeAndBuy, sellerStatusOf } from "./buy.ts";
 import type { BuyDeps } from "./buy.ts";
 import { createPool, migrate } from "./db.ts";
 import type { Pool } from "./db.ts";
@@ -96,11 +96,10 @@ const fetchPage = () => {
 };
 const methods = (fake: FakePayPal): string[] => fake.calls.map((c) => c.method);
 
-async function world(opts: { askAboveCents?: number; shops?: "allowed" | "none" } = {}) {
+async function world(opts: { askAboveCents?: number } = {}) {
   const u = await pool.query<{ id: string }>("insert into users (email, paypal_vault_id) values ($1, 'VAULT-1') returning id", [`${randomBytes(4).toString("hex")}@example.com`]);
   const userId = u.rows[0]!.id;
   await pool.query("insert into accounts (user_id, monthly_allowance_cents) values ($1, 50000)", [userId]);
-  if ((opts.shops ?? "allowed") === "allowed") for (const s of SHOPS) await setShopStatus(pool, userId, s.id, "allowed");
   const { mandateId } = await createMandate(pool, {
     userId, item: "Wireless earbuds", condition: "new", maxPriceCents: 10000, askAboveCents: opts.askAboveCents ?? 10000,
     deadline: "2027-03-01", sellerMinScore: 70, neverBuy: ["gift cards"], setAsideCents: 10000,
@@ -109,7 +108,7 @@ async function world(opts: { askAboveCents?: number; shops?: "allowed" | "none" 
 }
 
 function deps(model: ModelPort, paypal = new FakePayPal()): BuyDeps & { paypal: FakePayPal } {
-  return { paypal, model, fetchPage: fetchPage(), now: () => NOW };
+  return { paypal, model, fetchPage: fetchPage(), now: () => NOW, minSearches: 0 };
 }
 const kinds = async (userId: string) => (await listLedger(pool, userId)).map((r) => r.kind);
 const sentAmounts = (paypal: FakePayPal) => paypal.calls.filter((c) => c.method === "authorizeSaved").map((c) => (c.args as { amountCents: number }).amountCents);
@@ -201,37 +200,10 @@ test("the scam shop is never charged: the agent is turned down there and buys fr
   assert.equal((await pool.query("select count(*)::int as n from shop_orders so join orders o on o.id = so.order_id where o.mandate_id = $1 and so.shop_id = 'deal-zone'", [w.mandateId])).rows[0].n, 0);
 });
 
-test("the owner's shop list is enforced: unknown shops are refused, ask-every-time asks, allowed buys", { skip }, async () => {
-  const w = await world({ shops: "none" });
-  assert.equal(await getSellerStatus(pool, w.userId, "northgear"), "unknown");
-
-  // 1. No shops allowed yet: every proposal is turned down and nothing is charged.
-  const d1 = deps(scripted([...buyEarbuds(N), (p) => {
-    assert.match(results(p)[0]!.data.error, /not on your allowed list/);
-    return giveUp(p);
-  }]));
-  const r1 = await proposeAndBuy(pool, d1, { ...w, shops: REFS });
-  assert.equal(r1.stage, "agent");
-  assert.deepEqual(d1.paypal.calls, []);
-
-  // 2. Ask every time: the owner is asked even though the price is under the limit.
-  await setShopStatus(pool, w.userId, "northgear", "ask_every_time");
-  const d2 = deps(scripted(buyEarbuds(N)));
-  const r2 = await proposeAndBuy(pool, d2, { ...w, shops: REFS });
-  assert.equal(r2.stage, "owner");
-  assert.deepEqual(d2.paypal.calls, []);
-
-  // 3. Blocked: refused outright.
-  await setShopStatus(pool, w.userId, "northgear", "blocked");
-  const d3 = deps(scripted([...buyEarbuds(N), giveUp]));
-  assert.equal((await proposeAndBuy(pool, d3, { ...w, shops: REFS })).stage, "agent");
-  assert.deepEqual(d3.paypal.calls, []);
-
-  // 4. Allowed: it goes through.
-  await setShopStatus(pool, w.userId, "northgear", "allowed");
-  const d4 = deps(scripted(buyEarbuds(N)));
-  const r4 = await proposeAndBuy(pool, d4, { ...w, shops: REFS });
-  assert.equal(r4.stage === "purchase" && r4.result.status, "paid_out");
+test("every shop the app knows can be bought from, and any other address is unknown and refused", { skip }, async () => {
+  for (const shop of SHOPS) assert.equal(sellerStatusOf(shop.id), "allowed", shop.id);
+  assert.equal(sellerStatusOf("nowhere"), "unknown");
+  assert.equal(sellerStatusOf(""), "unknown");
 });
 
 test("if the price rises while the owner is deciding, the approval does not cover it and nothing is charged", { skip }, async () => {

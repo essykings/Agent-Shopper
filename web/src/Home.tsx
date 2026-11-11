@@ -1,8 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, api, money } from "./api";
-import type { Me, RequestRow, RunResult, Shop } from "./api";
-import { Guide } from "./Guide";
-import { MiniTown } from "./MiniTown";
+import type { Me, RequestRow, RunResult } from "./api";
+import { MyShopper } from "./Town";
 import { CHANGED } from "./needs";
 import { Busy, Intro, Note, Pill, letter, useLoad } from "./ui";
 import type { CaseRow } from "./api";
@@ -15,7 +14,11 @@ export function summarize(r: RunResult): { tone: "ok" | "warn" | "err"; text: st
   if (r.stage === "owner") return { tone: "warn", text: `Found it for ${money(r.totalCents ?? 0)}. Nothing is charged until you approve.` };
   if (r.stage === "agent") {
     const o = r.outcome ?? { status: "" };
-    if (o.status === "gave_up") return { tone: "warn", text: `Nothing fit your rules. ${o.reason ?? ""}` };
+    if (o.status === "gave_up") {
+      const tried = (o.tried ?? []).map((q) => (q.startsWith("the ") ? q : `"${q}"`));
+      const list = tried.length > 1 ? `${tried.slice(0, -1).join(", ")} and ${tried.at(-1)}` : tried.join("");
+      return { tone: "warn", text: `Nothing fit your rules. ${o.reason ?? ""}${list ? ` It searched for ${list} in the shops.` : ""} Try a simpler name and press Search again.` };
+    }
     if (o.status === "refused") return { tone: "err", text: "The shopper declined this request." };
     if (o.status === "time_limit") return { tone: "warn", text: "The shopper ran out of time before deciding. Nothing was bought. Try again in a moment." };
     if (o.status === "step_limit" || o.status === "token_limit") return { tone: "warn", text: "The shopper ran out of effort before deciding. Nothing was bought." };
@@ -51,9 +54,8 @@ export function RunPanel({ run }: { run: RunResult }) {
   );
 }
 
-export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; onNew: () => void }) {
+export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; refreshMe: () => void; onNew: () => void; startId?: string | null; onStarted?: () => void }) {
   const requests = useLoad(() => api<{ requests: RequestRow[] }>("GET", "/api/requests"));
-  const shops = useLoad(() => api<{ shops: Shop[] }>("GET", "/api/shops"));
   const cases = useLoad(() => api<{ cases: CaseRow[] }>("GET", "/api/cases"));
   const [running, setRunning] = useState<string | null>(null);
   const [runs, setRuns] = useState<Record<string, RunResult>>({});
@@ -75,6 +77,16 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
     window.dispatchEvent(new Event(CHANGED));
   }
 
+  // A request that was just created starts looking straight away. Nobody presses Run.
+  const started = useRef<string | null>(null);
+  useEffect(() => {
+    if (!startId || started.current === startId) return;
+    started.current = startId;
+    onStarted?.();
+    void run(startId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startId]);
+
   async function cancel(id: string) {
     try {
       await api("POST", `/api/requests/${id}/cancel`, {});
@@ -93,7 +105,7 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
         <Intro
           label="Welcome"
           title={<>Your shopper<br />is on it.</>}
-          sub="Tell it what to buy. It checks the shops, avoids the traps, and asks you before it spends past your limit."
+          sub="Tell it what to buy and the most you will pay. It checks the shops, avoids the traps, and buys it for you."
           panel={
             <div className="panel">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -101,8 +113,8 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
                 <span className="lab" style={{ color: "#5E5368" }}>This month</span>
               </div>
               <div className="figs">
-                <div><div className="fig">{money(b.freeCents)}</div><div className="lab" style={{ marginTop: 6 }}>Free of {money(b.monthlyAllowanceCents)}</div></div>
-                <div><div className="fig">{money(b.setAsideCents)}</div><div className="lab" style={{ marginTop: 6 }}>Set aside</div></div>
+                <div><div className="fig">{money(b.freeCents)}</div><div className="lab" style={{ marginTop: 6 }}>Left of {money(b.monthlyAllowanceCents)}</div></div>
+                <div><div className="fig">{money(b.setAsideCents)}</div><div className="lab" style={{ marginTop: 6 }}>Held for requests</div></div>
                 <div><div className="fig">{money(b.monthSpentCents)}</div><div className="lab" style={{ marginTop: 6 }}>Spent</div></div>
               </div>
               <div className="row" style={{ marginTop: 20 }}>
@@ -112,14 +124,6 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
             </div>
           }
         />
-        <section className="wrap" style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", justifyContent: "space-between" }}>
-          <div className="lab">Your shops</div>
-          <div className="chips">
-            {(shops.data?.shops ?? []).map((s) => (
-              <a key={s.id} className="chip" href="#/shops"><span className="dot">{letter(s.name)}</span>{s.name}</a>
-            ))}
-          </div>
-        </section>
       </div>
 
       <main className="body">
@@ -129,15 +133,7 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
               <Note tone="warn">No PayPal account is connected, so your shopper can look but not buy. <a href="#/wallet"><b>Connect one on the Wallet page</b></a></Note>
             </div>
           )}
-          <div className="cols" style={{ alignItems: "flex-start", marginBottom: 32 }}>
-            <Guide requests={list} cases={cases.data?.cases ?? []} onNew={onNew} />
-            <section className="card" style={{ flex: "1 1 380px", maxWidth: 520, minWidth: 0 }}>
-              <h2 className="h2">Watch the town</h2>
-              <p className="s" style={{ margin: "4px 0 14px" }}>Your shopper walks between the shops, the guard and PayPal. This is the same map as the Town page.</p>
-              <MiniTown />
-              <a className="btn2 sm" href="#/town" style={{ marginTop: 14 }}>Open the Town</a>
-            </section>
-          </div>
+          <div style={{ marginBottom: 32 }}><MyShopper /></div>
           <section className="card">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <h2 className="h2">Your requests</h2>
@@ -158,36 +154,33 @@ export function Home({ me, refreshMe, onNew }: { me: Me; refreshMe: () => void; 
                   r.status === "fulfilled" ? (
                     <>Bought{r.order ? ` ${money(r.order.total_cents)}` : ""}. <a href="#/orders"><b>See the order</b></a></>
                   ) : r.status === "cancelled" ? (
-                    "Cancelled. The money set aside is free again."
+                    "Cancelled. The money held for it is back in your allowance."
                   ) : waiting && ideas > 0 ? (
                     `Waiting for you: your shopper found ${ideas} gift idea${ideas === 1 ? "" : "s"}.`
                   ) : waiting && approval ? (
                     `Waiting for your OK: ${approval.itemName ?? approval.item_key} for ${money(approval.total_cents)} from ${approval.shopName ?? approval.shop_id}.`
                   ) : (
-                    "Ready. Press Run shopper to send it to the shops."
+                    busy ? "Your shopper is looking through the shops now." : "Not bought yet."
                   );
                 return (
                   <div className="item" key={r.id}>
                     <div className="mono">{r.kind === "gift" ? "🎁" : letter(r.item)}</div>
                     <div className="grow">
                       <div className="t">{r.item}</div>
-                      <div className="s">{r.kind === "gift" ? `Gift · ${r.goal?.interests ? `likes ${r.goal.interests} · ` : ""}` : ""}Up to {money(r.maxPriceCents)} · by {r.deadline} · shops scoring {r.sellerMinScore}+</div>
+                      <div className="s">{r.kind === "gift" ? `Gift · ${r.goal?.interests ? `likes ${r.goal.interests} · ` : ""}` : ""}Will pay up to {money(r.maxPriceCents)}, shipping included</div>
                       <div className={waiting ? "t" : "s"} style={{ marginTop: 4 }}>{status}</div>
                     </div>
                     {r.status === "fulfilled" && <Pill tone="ok">Bought</Pill>}
                     {r.status === "cancelled" && <Pill tone="bad">Cancelled</Pill>}
                     {waiting && <Pill tone="warn">Waiting for you</Pill>}
-                    {open && !waiting && <Pill tone="warn">Ready</Pill>}
+                    {open && !waiting && <Pill tone="warn">{busy ? "Searching" : "Not bought yet"}</Pill>}
                     <div className="row" style={{ alignItems: "center" }}>
                       {waiting && <a className="btn sm" href={`#/approve/${r.id}`}>{ideas > 0 ? (ideas === 1 ? "See the idea" : `See the ${ideas} ideas`) : "Review and approve"}</a>}
-                      {open && !waiting && (
-                        <button className="btn sm" disabled={busy || me.paused || running !== null || me.payment.source === "none"} onClick={() => run(r.id)}>
-                          {busy ? <Busy>Shopping…</Busy> : "Run shopper"}
-                        </button>
-                      )}
+                      {open && !waiting && (busy
+                        ? <span className="s"><Busy>Searching…</Busy></span>
+                        : <button className="btn2 sm" disabled={me.paused || running !== null || me.payment.source === "none"} onClick={() => run(r.id)}>Search again</button>)}
                       {open && <button className="linkbtn" disabled={busy} onClick={() => cancel(r.id)}>Cancel request</button>}
                     </div>
-                    {busy && <div style={{ flexBasis: "100%" }}><Note>The shopper is looking at the shops. This takes about 20 seconds. <a href="#/town"><b>Watch it in the Town</b></a></Note></div>}
                     {errors[r.id] && <div style={{ flexBasis: "100%" }}><Note tone="err">{errors[r.id]}</Note></div>}
                     {runs[r.id] && <RunPanel run={runs[r.id]!} />}
                   </div>

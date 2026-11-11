@@ -243,6 +243,8 @@ function arena(over: Partial<ShopperDeps> = {}) {
     store,
     getGuardFacts: async () => facts,
     now: () => NOW,
+    // Most tests use give_up as a quick way to end a run, so the "try three searches first" rule is off unless a test turns it on.
+    minSearches: 0,
     ...over,
   });
   return { base, store, fetched };
@@ -884,3 +886,64 @@ test("the model is told how many seconds are left, and warned when they run low"
   assert.equal(plain.seconds_left, undefined);
 });
 
+
+// ---------- not giving up too soon ----------
+
+const Tr = "http://trailhead.localhost:4103";
+const searchAll = (q: string, tag: string) => [N, Z, Tr].map((base, i) => use(`${tag}${i}`, "open_page", { url: `${base}/search?q=${encodeURIComponent(q)}` }));
+
+test("the shopper cannot give up on an item it never found until it has made three different searches in every shop", { skip }, async () => {
+  const { base } = arena({ minSearches: 3 });
+  const told: string[] = [];
+  const model = scripted([
+    () => reply([use("a", "give_up", { reason: "Not here." })]), // straight away: refused
+    (p) => {
+      told.push(lastResults(p)[0]!.data.error ?? JSON.stringify(lastResults(p)[0]!.data));
+      return reply(searchAll("water bottle for hiking", "s1"));
+    },
+    () => reply([use("b", "give_up", { reason: "Still nothing." })]), // one search only: refused again
+    (p) => {
+      told.push(String(lastResults(p)[0]!.data.error ?? JSON.stringify(lastResults(p)[0]!.data)));
+      return reply(searchAll("water bottle", "s2"));
+    },
+    () => reply(searchAll("bottle", "s3")),
+    () => reply([use("c", "give_up", { reason: "I could not find that in these shops." })]),
+  ]);
+  const run = await runShopperAgent(base(model), { mandate: { ...mandate, item: "Water bottle for hiking" }, shops: REFS });
+  assert.equal(run.outcome.status, "gave_up");
+  assert.deepEqual(run.outcome.status === "gave_up" && run.outcome.tried, ["water bottle for hiking", "water bottle", "bottle"]);
+  assert.match(told[0]!, /at least 3/, "it is told how many it must make");
+  assert.match(told[0]!, /"water bottle hiking"|"water bottle"/, "and what to try next");
+  assert.equal(model.calls.length, 6);
+});
+
+test("the refusal to give up is limited, so a stuck shopper cannot loop, and it never applies once a proposal was turned down", { skip }, async () => {
+  const stuck = scripted([
+    () => reply([use("a", "give_up", { reason: "x" })]),
+    () => reply([use("b", "give_up", { reason: "x" })]),
+    () => reply([use("c", "give_up", { reason: "x" })]),
+  ]);
+  const run = await runShopperAgent(arena({ minSearches: 3 }).base(stuck), { mandate, shops: REFS });
+  assert.equal(run.outcome.status, "gave_up", "the third time it is allowed to stop");
+  assert.equal(stuck.calls.length, 3);
+  assert.equal(run.outcome.status === "gave_up" && run.outcome.tried, undefined, "nothing was searched, so there is nothing to list");
+
+  // A shopper that found a listing and had it turned down may give up at once: it did look.
+  const { base } = arena({ minSearches: 3 });
+  const model = scripted([
+    () => reply([use("a", "open_page", { url: `${Z}/products/ps5-disc` })]),
+    (p) => reply([use("b", "propose_purchase", { snapshot_id: lastResults(p)[0]!.data.snapshot_id, reasoning: "Cheapest.", claims: goodClaims })]),
+    () => reply([use("c", "give_up", { reason: "Only the scam shop has it." })]),
+  ]);
+  const after = await runShopperAgent(base(model), { mandate, shops: REFS });
+  assert.equal(after.outcome.status, "gave_up");
+  assert.equal(model.calls.length, 3, "no extra searches were demanded");
+});
+
+test("the item prompt tells the shopper to simplify its words and try at least three searches", { skip }, async () => {
+  const model = scripted([() => reply([use("a", "give_up", { reason: "x" })])]);
+  await runShopperAgent(arena().base(model), { mandate, shops: REFS });
+  const system = String(model.calls[0]!.system);
+  assert.match(system, /do not give up\. Search again with fewer or simpler words/);
+  assert.match(system, /at least 3 different searches/);
+});

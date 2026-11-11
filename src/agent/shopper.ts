@@ -7,6 +7,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
 import { evaluate } from "../server/guard.ts";
 import type { Emit, PageKind } from "../shared/events.ts";
+import { searchLadder } from "../shared/words.ts";
 import type { Claim, GiftGoal, GuardContext, GuardResult, Mandate, Proposal } from "../shared/types.ts";
 import { money } from "../shops/pages.ts";
 import { detectInjection, extractLinks, parseAbout, parseProduct } from "./pages.ts";
@@ -38,6 +39,8 @@ export interface ShopperDeps {
   maxTotalTokens?: number;
   /** Most milliseconds one whole run may take. When it passes, the run stops with what it has (gift ideas already accepted are kept). */
   deadlineMs?: number;
+  /** Different searches an item request must try before give_up is allowed (default 3). 0 turns the rule off. */
+  minSearches?: number;
   /** Told about each step as it happens, for the live screens. A failing listener never stops the run. */
   onEvent?: Emit;
 }
@@ -70,7 +73,7 @@ export type ShopperOutcome =
   | { status: "proposed"; proposal: Proposal; guard: GuardResult; reasoning: string }
   /** Gift requests: up to three ideas, none of them bought. The owner chooses. */
   | { status: "shortlist"; picks: Pick[]; summary: string }
-  | { status: "gave_up"; reason: string }
+  | { status: "gave_up"; reason: string; /** The searches it tried, for the owner to see. */ tried?: string[] }
   | { status: "refused" }
   | { status: "step_limit" }
   | { status: "token_limit" }
@@ -91,6 +94,8 @@ export interface ShopperRun {
 export const DEFAULT_MODEL = "claude-haiku-5-5";
 
 const MAX_PAGE_TEXT = 6000;
+/** Different searches an item request must have tried before the shopper may say it cannot find it. */
+const MIN_SEARCHES = 3;
 /** Most gift ideas the shopper may put forward. */
 export const MAX_PICKS = 3;
 
@@ -197,6 +202,7 @@ ${shops.map((s) => `- ${s.id}: ${s.baseUrl}`).join("\n")}
 
 How to work:
 - Each shop sells about 100 products in 16 departments. Search it at its address plus /search?q=words (for example /search?q=wireless+earbuds). /search?category=electronics lists one department. Results come 12 to a page: add &page=2 for more, and &sort=price for the cheapest first. Search every shop first, then open the product pages that match.
+- If a search finds nothing, do not give up. Search again with fewer or simpler words: drop words like "for", and the use or the brand, so "water bottle for hiking" becomes "water bottle", then "bottle". Shops often name things more simply than people do. Try at least ${MIN_SEARCHES} different searches, in every shop, before you call give_up: it is refused until you have.
 - Every page you open comes with its links. Product addresses cannot be guessed, so open a product only by the exact address from the links list. You can only propose from a product's own page, never from a search page.
 - Look at every shop that might sell the item, open the product pages, and compare the real total price (shown as "Total") and the arrival date.
 - Run check_seller on every shop you consider. A cheap price from a shop with a low score is a trap, not a deal.
@@ -339,6 +345,13 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
     if (shopId) {
       const k = pageKind(page.url);
       emit({ type: "visit", shopId, page: k.page, label: k.page === "product" ? page.title.split(" | ")[0] || "Product page" : k.label });
+      if (k.page === "search") {
+        const u = new URL(page.url);
+        const asked = (u.searchParams.get("q") ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+        const dept = u.searchParams.get("category");
+        searches.add(asked || (dept ? `the ${dept} department` : "everything"));
+        searchedShops.add(shopId);
+      }
     }
     return ok({
       snapshot_id: id,
@@ -471,14 +484,33 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
     return ok({ acknowledged: true });
   }
 
+  // Searches made so far (different words, or a department), and which shops were searched. Giving up on an
+  // item that was never found is refused until it has really tried. It is refused at most twice, so it cannot loop.
+  const searches = new Set<string>();
+  const searchedShops = new Set<string>();
+  let giveUpRefusals = 0;
+
   function giveUp(args: Record<string, unknown>): ToolOut {
     const reason = str(args["reason"]) || "No reason given.";
+    const minSearches = deps.minSearches ?? MIN_SEARCHES;
+    const neverFound = !gift && rejections.length === 0 && minSearches > 0;
+    const unsearched = shops.filter((s) => !searchedShops.has(s.id)).map((s) => s.id);
+    if (neverFound && (searches.size < minSearches || unsearched.length > 0) && giveUpRefusals < 2) {
+      giveUpRefusals++;
+      const next = searchLadder(mandate.item).filter((q) => !searches.has(q));
+      return fail(
+        `Not yet. You have made ${searches.size} different search${searches.size === 1 ? "" : "es"} and you must make at least ${minSearches}, in every shop, before giving up.` +
+          (unsearched.length ? ` You have not searched ${unsearched.join(", ")} yet.` : "") +
+          (next.length ? ` Search again with simpler words, for example: ${next.slice(0, 3).map((q) => `"${q}"`).join(", ")}.` : " Browse a department with /search?category=NAME.") +
+          " Shops often use shorter names than people do.",
+      );
+    }
     if (gift && picks.length > 0) {
       outcome = shortlist(reason);
       actions.push({ tool: "finish_picks", summary: `Put forward ${picks.length} gift idea${picks.length === 1 ? "" : "s"}`, ok: true });
       return ok({ acknowledged: true });
     }
-    outcome = { status: "gave_up", reason };
+    outcome = { status: "gave_up", reason, ...(searches.size ? { tried: [...searches] } : {}) };
     actions.push({ tool: "give_up", summary: `Gave up: ${reason}`, ok: true });
     emit({ type: "giveup", reason });
     return ok({ acknowledged: true });

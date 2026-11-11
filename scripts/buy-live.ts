@@ -16,7 +16,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createPageFetcher } from "../src/agent/pages.ts";
 import { DEFAULT_MODEL } from "../src/agent/shopper.ts";
 import type { ModelPort, ShopRef } from "../src/agent/shopper.ts";
-import { approveAndBuy, proposeAndBuy, setShopStatus } from "../src/server/buy.ts";
+import { approveAndBuy, proposeAndBuy } from "../src/server/buy.ts";
 import { createPool, migrate } from "../src/server/db.ts";
 import { listLedger } from "../src/server/ledger.ts";
 import { createMandate } from "../src/server/mandates.ts";
@@ -73,7 +73,6 @@ try {
   const u = await pool.query<{ id: string }>("insert into users (email, paypal_vault_id) values ('buy-live@example.com', $1) returning id", [env.VAULT_ID]);
   const userId = u.rows[0]!.id;
   await pool.query("insert into accounts (user_id, monthly_allowance_cents) values ($1, 50000)", [userId]);
-  for (const s of shops) await setShopStatus(pool, userId, s.id, "allowed");
   const { mandateId } = await createMandate(pool, {
     userId, item: "Wireless earbuds", condition: "new", maxPriceCents: 10000, askAboveCents: forceAsk ? 4000 : 10000,
     deadline: "2030-01-01", sellerMinScore: 70, neverBuy: ["gift cards", "crypto", "alcohol"], setAsideCents: 10000,

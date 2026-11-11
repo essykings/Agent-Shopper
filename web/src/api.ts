@@ -8,6 +8,9 @@ export class ApiError extends Error {
   }
 }
 
+/** Sent when the server says the person is no longer signed in, so whatever page is open can go back to the sign-in screen. */
+export const SIGNED_OUT = "agent-shopper:signed-out";
+
 export async function api<T = any>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -15,6 +18,7 @@ export async function api<T = any>(method: "GET" | "POST" | "PUT", path: string,
     ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
   });
   const json: any = await res.json().catch(() => ({}));
+  if (res.status === 401) window.dispatchEvent(new Event(SIGNED_OUT));
   if (!res.ok) throw new ApiError(res.status, json.error ?? "Something went wrong. Try again in a moment.", json.code);
   return json as T;
 }
@@ -42,10 +46,11 @@ export interface Shop {
   id: string;
   name: string;
   tagline: string;
+  /** Where to open the shop in a browser. */
+  url: string | null;
   score: number;
   findings: string[];
   categories: string[];
-  status: "allowed" | "ask_every_time" | "blocked";
 }
 export interface Check {
   id: string;
@@ -128,7 +133,7 @@ export interface RunResult {
   stage: "agent" | "owner" | "purchase" | "shortlist";
   picks?: Array<{ proposalId: string; totalCents: number }>;
   summary?: string;
-  outcome?: { status: string; reason?: string; message?: string };
+  outcome?: { status: string; reason?: string; message?: string; tried?: string[] };
   proposalId?: string;
   totalCents?: number;
   result?: { status: string; reason?: string; detail?: string; checks?: Check[] };

@@ -64,6 +64,30 @@ export function useLive(url: string): { world: World; status: Status; idle: bool
   return { world, status, idle };
 }
 
+/** How many tasks have finished today (the whole town's, and the signed-in person's own). Checked now and every 10 seconds. */
+export function useTodayCounts(): { total: number | null; mine: number | null } {
+  const [counts, setCounts] = useState<{ total: number | null; mine: number | null }>({ total: null, mine: null });
+  useEffect(() => {
+    let stop = false;
+    const look = async () => {
+      if (document.hidden) return;
+      try {
+        const r = await api<{ finishedToday: number; mineToday?: number }>("GET", "/api/town/status");
+        if (!stop) setCounts({ total: r.finishedToday, mine: r.mineToday ?? null });
+      } catch {
+        // Keep the last number. The next check tries again.
+      }
+    };
+    void look();
+    const timer = window.setInterval(() => void look(), 10_000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+  return counts;
+}
+
 // ---------- the map ----------
 
 const SHOP_Y: Record<string, number> = { northgear: 110, "deal-zone": 270, trailhead: 430 };
@@ -87,7 +111,20 @@ function Agent({ a, x, y }: { a: AgentView; x: number; y: number }) {
   );
 }
 
-export function Scene({ world, homeLabel, empty, compact = false }: { world: World; homeLabel: string; empty: string; compact?: boolean }) {
+/** A shopper with nothing to do yet. It rests beside the owner's house, so the map is never empty. It is not a real run. */
+function WaitingAgent({ bubble, name }: { bubble: string; name: string }) {
+  const [x, y] = standOf({ kind: "home" });
+  return (
+    <div className="agent idle" style={{ transform: `translate(${x - 22}px, ${y - 22}px)` }}>
+      <div className="bubble t-plain">{bubble}</div>
+      <div className="bot" aria-hidden="true"><i /><i /></div>
+      <div className="aname">{name}</div>
+    </div>
+  );
+}
+
+/** "empty" is what the waiting shopper says. "finished" is the number in the bottom right corner, when there is one. */
+export function Scene({ world, homeLabel, empty, finished = null, finishedLabel = "today", compact = false }: { world: World; homeLabel: string; empty: string; finished?: number | null; finishedLabel?: string; compact?: boolean }) {
   const agents = useMemo(() => {
     const list = Object.values(world.agents).sort((a, b) => a.runId.localeCompare(b.runId));
     const seen = new Map<string, number>();
@@ -156,7 +193,8 @@ export function Scene({ world, homeLabel, empty, compact = false }: { world: Wor
         )}
 
         {agents.map(({ a, x, y }) => <Agent key={a.runId} a={a} x={x} y={y} />)}
-        {!compact && agents.length === 0 && <div className="emptytown">{empty}</div>}
+        {agents.length === 0 && <WaitingAgent bubble={empty || "Waiting"} name={homeLabel === "You" ? "Your shopper" : "A shopper"} />}
+        {finished !== null && !compact && <div className="tally" role="status">Finished {finished} task{finished === 1 ? "" : "s"} {finishedLabel}</div>}
       </div>
     </div>
   );
@@ -198,6 +236,7 @@ const STATUS_TEXT: Record<Status, string> = {
 
 export function Playground({ me, refreshMe }: { me: Me; refreshMe: () => void }) {
   const { world, status, idle } = useLive("/api/live");
+  const today = useTodayCounts();
   const requests = useLoad(() => api<{ requests: RequestRow[] }>("GET", "/api/requests"));
   const open = (requests.data?.requests ?? []).filter((r) => r.status === "active" && !r.order);
   const [picked, setPicked] = useState("");
@@ -263,7 +302,7 @@ export function Playground({ me, refreshMe }: { me: Me; refreshMe: () => void })
               <h2 className="h2">The town</h2>
               <span className="s" role="status">{STATUS_TEXT[status]}</span>
             </div>
-            <Scene world={world} homeLabel="You" empty="No shopper is out right now. Pick a request and press Run shopper." />
+            <Scene world={world} homeLabel="You" empty="Waiting for a request" finished={today.mine ?? today.total} />
           </section>
           {error && <Note tone="err">{error}</Note>}
           {summary && result && (
@@ -282,12 +321,27 @@ export function Playground({ me, refreshMe }: { me: Me; refreshMe: () => void })
   );
 }
 
+/** Your own shopper on the map, for the Home page: live while it works, waiting when it does not. */
+export function MyShopper() {
+  const { world } = useLive("/api/live");
+  const today = useTodayCounts();
+  const doing = world.log.at(-1)?.text;
+  return (
+    <section className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <h2 className="h2">Your shopper</h2>
+        <span className="s" role="status" aria-live="polite">{doing ?? "Waiting for a request"}</span>
+      </div>
+      <Scene world={world} homeLabel="You" empty="Waiting for a request" finished={today.mine ?? today.total} />
+    </section>
+  );
+}
+
 // ---------- the public Town square ----------
 
 export function TownSquare({ signedIn }: { signedIn: boolean }) {
-  // Changing the number after the "?" opens the stream again, which replays the runs: the owner's own latest first.
-  const [again, setAgain] = useState(0);
-  const { world, status } = useLive(`/api/town?again=${again}`);
+  const { world, status } = useLive("/api/town");
+  const today = useTodayCounts();
   const [copied, setCopied] = useState<"idle" | "yes" | "no">("idle");
   const link = `${window.location.origin}/#/town`;
   async function share() {
@@ -299,8 +353,7 @@ export function TownSquare({ signedIn }: { signedIn: boolean }) {
     }
     window.setTimeout(() => setCopied("idle"), 5000);
   }
-  const replaying = Object.values(world.agents).some((a) => a.replay);
-  const sample = Object.values(world.agents).some((a) => a.sample);
+  const live = Object.keys(world.agents).length > 0;
   const mine = Object.values(world.agents).some((a) => a.mine);
   return (
     <>
@@ -311,18 +364,13 @@ export function TownSquare({ signedIn }: { signedIn: boolean }) {
           sub="Agents from this demo, shopping right now. Each one is anonymous, and nothing anyone typed is shown."
           panel={
             <div className="panel">
-              <span className="tag">{sample ? "Example run" : replaying ? "Replay" : "Live"}</span>
+              <span className="tag">{live ? "Live" : "Waiting"}</span>
               <p style={{ margin: "14px 0 16px", fontSize: 16, lineHeight: 1.5 }}>
-                {sample
-                  ? "Nobody has run a shopper yet, so this is a scripted example. Real runs appear here the moment they start."
-                  : replaying
-                    ? "Nobody is shopping at this moment, so this replays a recent real run. Live runs take over as they start."
-                    : "These are real runs, happening now."}
+                {live ? "These are real runs, happening now." : "Nobody is shopping at this moment. A shopper waits here, and real runs appear the moment they start."}
               </p>
               {mine && <p className="s" style={{ margin: "0 0 14px" }}>Your agent has a ring around it and says "You". Only you can tell which one it is.</p>}
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <a className="btn" href="#/">{signedIn ? "Go to my shopper" : "Try it yourself"}</a>
-                {signedIn && <button className="btn2" onClick={() => setAgain((n) => n + 1)}>Watch my last run again</button>}
                 <button className="btn2" onClick={share}>{copied === "yes" ? "Link copied" : "Share the Town"}</button>
                 {signedIn && <a className="s" href="#/playground" style={{ fontWeight: 700 }}>See the private details in the Playground</a>}
               </div>
@@ -344,7 +392,7 @@ export function TownSquare({ signedIn }: { signedIn: boolean }) {
               <h2 className="h2">The town</h2>
               <span className="s" role="status">{STATUS_TEXT[status]}</span>
             </div>
-            <Scene world={world} homeLabel="Owner" empty="Waiting for a shopper…" />
+            <Scene world={world} homeLabel="Owner" empty="Waiting for a shopper" finished={today.total} />
           </section>
           <div className="cols">
             <Steps world={world} title="What is happening" hint="Shop names, products, scores and amounts. Never what anyone typed, or why the guard decided." />

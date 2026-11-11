@@ -4,55 +4,42 @@ import { ApiError, api } from "./api";
 import { Note } from "./ui";
 
 const dollars = (s: string): number => Math.round(Number(s) * 100);
-const inDays = (n: number): string => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
-/** The next 20 December, so "a gift for Christmas" starts with a sensible date. */
-const nextChristmasCutoff = (): string => {
-  const now = new Date();
-  const thisYear = new Date(Date.UTC(now.getUTCFullYear(), 11, 20));
-  return (thisYear.getTime() >= now.getTime() ? thisYear : new Date(Date.UTC(now.getUTCFullYear() + 1, 11, 20))).toISOString().slice(0, 10);
-};
 
-type Kind = "item" | "gift";
+// Things the demo shops really sell, with a price that is enough to buy them. Each time the form opens it suggests
+// a different one, so people do not all start with the same earbuds.
+const SUGGESTIONS: Array<{ item: string; price: string }> = [
+  { item: "Wireless earbuds", price: "60" },
+  { item: "Bluetooth speaker", price: "80" },
+  { item: "Webcam", price: "50" },
+  { item: "Power bank", price: "40" },
+  { item: "USB-C hub", price: "60" },
+  { item: "Trail socks", price: "50" },
+  { item: "Headlamp", price: "50" },
+  { item: "Water bottle", price: "35" },
+  { item: "First aid kit", price: "35" },
+  { item: "Wool hat", price: "30" },
+  { item: "Mechanical keyboard", price: "90" },
+  { item: "Wireless mouse", price: "35" },
+];
 
-export function NewRequest({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [kind, setKind] = useState<Kind>("item");
-  const [item, setItem] = useState("Wireless earbuds");
-  const [recipient, setRecipient] = useState("Dad");
-  const [occasion, setOccasion] = useState("Christmas");
-  const [interests, setInterests] = useState("hiking, coffee");
-  const [maxPrice, setMaxPrice] = useState("100");
-  const [askAbove, setAskAbove] = useState("100");
-  const [deadline, setDeadline] = useState(inDays(90));
-  const [minScore, setMinScore] = useState("70");
-  const [neverBuy, setNeverBuy] = useState("gift cards, crypto, alcohol");
-  const [condition, setCondition] = useState("new");
+// A request is two things: what to buy, and the most to pay. The rest (deadline, shop score, never-buy list)
+// has sensible defaults on the server, and the shopper starts as soon as the request is saved.
+export function NewRequest({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
+  const [start] = useState(() => SUGGESTIONS[Math.floor(Math.random() * SUGGESTIONS.length)]!);
+  const [item, setItem] = useState(start.item);
+  const [maxPrice, setMaxPrice] = useState(start.price);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-
-  function choose(k: Kind) {
-    setKind(k);
-    if (k === "gift") {
-      setMaxPrice("80");
-      setDeadline(nextChristmasCutoff());
-    } else {
-      setMaxPrice("100");
-      setDeadline(inDays(90));
-    }
-  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setSaving(true);
-    const common = {
-      condition, maxPriceCents: dollars(maxPrice), deadline, sellerMinScore: Number(minScore),
-      neverBuy: neverBuy.split(",").map((s) => s.trim()).filter(Boolean),
-    };
     try {
-      await api("POST", "/api/requests", kind === "gift" ? { kind, recipient, occasion, interests, ...common } : { kind, item, askAboveCents: dollars(askAbove), ...common });
-      onCreated();
+      const made = await api<{ id: string }>("POST", "/api/requests", { kind: "item", item, maxPriceCents: dollars(maxPrice) });
+      onCreated(made.id);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save the request.");
+      setError(err instanceof ApiError ? err.message : "Could not start the request.");
       setSaving(false);
     }
   }
@@ -64,74 +51,19 @@ export function NewRequest({ onClose, onCreated }: { onClose: () => void; onCrea
           <h2 className="h2">What should it buy?</h2>
           <button type="button" className="btn2 sm" onClick={onClose}>Close</button>
         </div>
-        <div className="seg" role="group" aria-label="Kind of request" style={{ marginBottom: 18 }}>
-          <button type="button" className={kind === "item" ? "on" : ""} aria-pressed={kind === "item"} onClick={() => choose("item")}>A specific item</button>
-          <button type="button" className={kind === "gift" ? "on" : ""} aria-pressed={kind === "gift"} onClick={() => choose("gift")}>A gift or an occasion</button>
+        <div className="field">
+          <label htmlFor="nr-item">What to buy</label>
+          <input id="nr-item" value={item} onChange={(e) => setItem(e.target.value)} />
+          <small>Change it to anything you like, or <a href="#/shops" onClick={onClose}><b>see what's available in the shops</b></a>.</small>
         </div>
-
-        {kind === "item" ? (
-          <div className="field">
-            <label htmlFor="nr-item">What to buy</label>
-            <input id="nr-item" value={item} onChange={(e) => setItem(e.target.value)} />
-            <small>The demo shops sell wireless earbuds, a PS5, trail socks, a USB-C hub and about 100 other things each.</small>
-          </div>
-        ) : (
-          <>
-            <div className="grid2">
-              <div className="field">
-                <label htmlFor="nr-who">Who is it for?</label>
-                <input id="nr-who" value={recipient} maxLength={30} onChange={(e) => setRecipient(e.target.value)} />
-              </div>
-              <div className="field">
-                <label htmlFor="nr-occ">What is the occasion?</label>
-                <input id="nr-occ" value={occasion} maxLength={30} onChange={(e) => setOccasion(e.target.value)} />
-              </div>
-            </div>
-            <div className="field">
-              <label htmlFor="nr-likes">What do they like?</label>
-              <input id="nr-likes" value={interests} maxLength={200} onChange={(e) => setInterests(e.target.value)} />
-              <small>Your shopper suggests up to three gifts. You choose one, and nothing is bought until you do.</small>
-            </div>
-          </>
-        )}
-
-        <div className="grid2">
-          <div className="field">
-            <label htmlFor="nr-max">{kind === "gift" ? "Most you will spend ($)" : "Most you will pay ($)"}</label>
-            <input id="nr-max" inputMode="decimal" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} />
-            <small>Including shipping. This much is set aside from your allowance.</small>
-          </div>
-          {kind === "item" && (
-            <div className="field">
-              <label htmlFor="nr-ask">Ask me above ($)</label>
-              <input id="nr-ask" inputMode="decimal" value={askAbove} onChange={(e) => setAskAbove(e.target.value)} />
-              <small>Above this, nothing is charged until you approve.</small>
-            </div>
-          )}
-          <div className="field">
-            <label htmlFor="nr-date">{kind === "gift" ? "Must arrive by" : "Needed by"}</label>
-            <input id="nr-date" type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
-          </div>
-          <div className="field">
-            <label htmlFor="nr-score">Lowest shop score (0 to 100)</label>
-            <input id="nr-score" inputMode="numeric" value={minScore} onChange={(e) => setMinScore(e.target.value)} />
-          </div>
-          <div className="field">
-            <label htmlFor="nr-cond">Condition</label>
-            <select id="nr-cond" value={condition} onChange={(e) => setCondition(e.target.value)}>
-              <option value="new">Brand new and sealed</option>
-              <option value="any">Any condition</option>
-            </select>
-          </div>
-          <div className="field">
-            <label htmlFor="nr-never">Never buy</label>
-            <input id="nr-never" value={neverBuy} onChange={(e) => setNeverBuy(e.target.value)} />
-            <small>Separate with commas.</small>
-          </div>
+        <div className="field">
+          <label htmlFor="nr-max">Most you will pay ($)</label>
+          <input id="nr-max" inputMode="decimal" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} />
+          <small>Including shipping. Your shopper buys the best match at or under this, without asking you.</small>
         </div>
         {error && <Note tone="err">{error}</Note>}
         <div className="row" style={{ marginTop: 16 }}>
-          <button className="btn" disabled={saving}>{saving ? "Saving…" : "Set aside the money and save"}</button>
+          <button className="btn" disabled={saving}>{saving ? "Starting…" : "Find and buy it"}</button>
         </div>
       </form>
     </div>

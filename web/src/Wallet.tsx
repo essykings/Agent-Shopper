@@ -90,12 +90,12 @@ export function Wallet({ me, refreshMe }: { me: Me; refreshMe: () => void }) {
                 <span className="lab" style={{ color: "#5E5368" }}>This month</span>
               </div>
               <div className="fig" style={{ fontSize: 64, marginTop: 14 }}>{money(b.freeCents)}</div>
-              <div className="meter" role="img" aria-label={`${money(b.monthSpentCents)} spent, ${money(b.setAsideCents)} set aside, ${money(b.freeCents)} free`}>
+              <div className="meter" role="img" aria-label={`${money(b.monthSpentCents)} spent, ${money(b.setAsideCents)} held for requests, ${money(b.freeCents)} free`}>
                 <div style={{ width: `${pct(b.monthSpentCents)}%`, background: "#2B1F3D" }} />
                 <div style={{ width: `${pct(b.setAsideCents)}%`, background: "#FDD05A", borderLeft: "2px solid #2B1F3D" }} />
               </div>
               <div className="row lab" style={{ marginTop: 10, gap: "6px 18px" }}>
-                <span>{money(b.monthSpentCents)} spent</span><span>{money(b.setAsideCents)} set aside</span><span>{money(b.freeCents)} free</span>
+                <span>{money(b.monthSpentCents)} spent</span><span>{money(b.setAsideCents)} held for requests</span><span>{money(b.freeCents)} free</span>
               </div>
             </div>
           }

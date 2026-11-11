@@ -10,7 +10,6 @@ import { parseAbout } from "../agent/pages.ts";
 import type { ShopRef } from "../agent/shopper.ts";
 import { scoreSeller } from "../agent/seller.ts";
 import { getBalances } from "../server/balances.ts";
-import { getSellerStatus, setShopStatus } from "../server/buy.ts";
 import type { BuyDeps } from "../server/buy.ts";
 import type { Pool } from "../server/db.ts";
 import { streamSSE } from "hono/streaming";
@@ -38,6 +37,8 @@ export interface AppDeps {
   buy: BuyDeps;
   limits: Limits;
   shops: ShopRef[];
+  /** Where a person's browser can open each shop (the addresses in "shops" may be private to the servers). Falls back to those. */
+  shopLinks?: Record<string, string>;
   sessionSecret: string;
   secureCookies: boolean;
   /** The saved sandbox buyer PayPal that every demo account pays with, unless the person connects their own. */
@@ -188,9 +189,6 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
       ]);
       userId = u.rows[0]!.id;
       await client.query("insert into accounts (user_id, monthly_allowance_cents) values ($1, $2)", [userId, DEMO_ALLOWANCE_CENTS]);
-      for (const s of SHOPS) {
-        await client.query("insert into user_shops (user_id, shop_id, status) values ($1, $2, 'allowed')", [userId, s.id]);
-      }
       await client.query("commit");
     } catch (err) {
       await client.query("rollback");
@@ -323,27 +321,17 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
   // ---------- shops ----------
 
   app.get("/api/shops", needUser, async (c) => {
-    const userId = c.get("userId");
     const out = [];
     for (const s of SHOPS) {
       // The score uses the same facts the agent reads from the shop's own about page.
       const about = parseAbout({ url: "http://x/about", status: 200, html: renderAbout(s), text: pageText(renderAbout(s)), title: "" });
       const report = scoreSeller(about, { now: now(), injectionSeen: s.hiddenInstruction !== undefined });
       out.push({
-        id: s.id, name: s.name, tagline: s.tagline, score: report.score, findings: report.findings.map((f) => f.text),
-        categories: [...new Set(s.products.map((p) => p.category))], status: await getSellerStatus(pool, userId, s.id),
+        id: s.id, name: s.name, tagline: s.tagline, url: deps.shopLinks?.[s.id] ?? deps.shops.find((x) => x.id === s.id)?.baseUrl ?? null, score: report.score, findings: report.findings.map((f) => f.text),
+        categories: [...new Set(s.products.map((p) => p.category))],
       });
     }
     return c.json({ shops: out });
-  });
-
-  app.put("/api/shops/:id", needUser, async (c) => {
-    const id = idOf(c);
-    if (!SHOPS.some((s) => s.id === id)) throw new HttpError(404, "Shop not found.");
-    const status = (await body(c))["status"];
-    if (status !== "allowed" && status !== "ask_every_time" && status !== "blocked") throw new HttpError(400, "status must be allowed, ask_every_time or blocked.");
-    await setShopStatus(pool, c.get("userId"), id, status);
-    return c.json({ id, status });
   });
 
   // ---------- requests ----------
@@ -383,17 +371,21 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
   app.post("/api/requests", needUser, async (c) => {
     const b = await body(c);
     const gift = b["kind"] === "gift";
+    // Gift requests are switched off for now (set ENABLE_GIFTS=1 to bring them back). The code stays.
+    if (gift && process.env["ENABLE_GIFTS"] !== "1") throw new HttpError(400, "Gift requests are not available right now.");
     const maxPriceCents = int(b["maxPriceCents"], "The price limit", 100, 50_000);
-    // A gift is always the owner's choice, so it has no separate ask-me limit.
-    const askAboveCents = gift ? maxPriceCents : int(b["askAboveCents"], "The ask-me limit", 100, maxPriceCents);
-    const sellerMinScore = int(b["sellerMinScore"], "The minimum shop score", 0, 100);
+    // The price is the only limit. Within it the shopper buys without asking, so the ask-me limit equals the price
+    // unless an older client still sends its own. A gift is always the owner's choice and has no separate limit.
+    const askAboveCents = gift || b["askAboveCents"] === undefined ? maxPriceCents : int(b["askAboveCents"], "The ask-me limit", 100, maxPriceCents);
+    // Everything else has a sensible default, so a request is just "what" and "how much".
+    const sellerMinScore = b["sellerMinScore"] === undefined ? 70 : int(b["sellerMinScore"], "The minimum shop score", 0, 100);
     const condition = b["condition"] === "any" ? "any" : "new";
-    const deadline = str(b["deadline"], "The deadline", 10, 10);
+    const deadline = b["deadline"] === undefined ? new Date(now().getTime() + 30 * 86_400_000).toISOString().slice(0, 10) : str(b["deadline"], "The deadline", 10, 10);
     const when = Date.parse(`${deadline}T00:00:00Z`);
     if (Number.isNaN(when) || when < now().getTime() - 86_400_000 || when > now().getTime() + 400 * 86_400_000) {
       throw new HttpError(400, "The deadline must be a date within the next year.");
     }
-    const rawBanned = Array.isArray(b["neverBuy"]) ? b["neverBuy"] : [];
+    const rawBanned = b["neverBuy"] === undefined ? ["gift cards", "crypto", "alcohol"] : Array.isArray(b["neverBuy"]) ? b["neverBuy"] : [];
     if (rawBanned.length > 10) throw new HttpError(400, "Ban at most 10 categories.");
     const neverBuy = rawBanned.map((x) => str(x, "A banned category", 1, 30).toLowerCase());
 
@@ -518,10 +510,12 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     });
   });
 
-  // How many shoppers are working right now. Public and cheap: a number and nothing else.
+  // How many shoppers are working right now, and how many tasks have finished today. Public and cheap: numbers and nothing else.
+  // Someone who is signed in also gets their own count.
   app.get("/api/town/status", (c) => {
     c.header("Cache-Control", "no-store");
-    return c.json({ shoppingNow: hub.activeRuns() });
+    const viewer = verifySession(getCookie(c, COOKIE), deps.sessionSecret, now().getTime());
+    return c.json({ shoppingNow: hub.activeRuns(), finishedToday: hub.finishedToday(), ...(viewer ? { mineToday: hub.finishedToday(viewer) } : {}) });
   });
 
   // Everyone's runs, anonymous. No sign-in needed, so it is limited per address and in total.
@@ -536,7 +530,6 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
         await stream.writeSSE({ event: "busy", data: "" });
         return;
       }
-      for (const f of hub.replay(viewer)) await stream.writeSSE({ data: JSON.stringify(f) });
       await stream.writeSSE({ event: "ready", data: "" });
       await keepOpen(stream, off);
     });

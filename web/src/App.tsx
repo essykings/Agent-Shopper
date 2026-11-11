@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, api } from "./api";
+import { ApiError, SIGNED_OUT, api } from "./api";
 import type { Me } from "./api";
 import { Approve } from "./Approve";
 import { Home } from "./Home";
 import { NewRequest } from "./NewRequest";
 import { Orders } from "./Orders";
 import { Playground, PublicTown, TownSquare } from "./Town";
-import { markVisited, setGuideHidden } from "./Guide";
 import { MiniTown } from "./MiniTown";
 import { CHANGED, NeedsBar, useNeeds } from "./needs";
 import { Shops } from "./Shops";
@@ -51,6 +50,7 @@ function Landing({ onDone }: { onDone: (problem?: string) => void }) {
   return (
     <div className="band" style={{ minHeight: "100vh", justifyContent: "center" }}>
       <Intro
+        middle
         label="Agent Shopper · PayPal AI hackathon"
         title={<>A shopper that<br />can't overspend.</>}
         sub="An AI agent browses the shops, avoids the traps, and buys with PayPal. Your rules decide whether any money moves, not the AI."
@@ -94,6 +94,7 @@ export function App() {
   const [checked, setChecked] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [startId, setStartId] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
   const [note, setNote] = useState<{ tone: "ok" | "err" | "warn"; text: string } | null>(() => {
     const code = new URLSearchParams(window.location.search).get("connect");
@@ -120,14 +121,17 @@ export function App() {
     if (window.location.search) window.history.replaceState(null, "", window.location.pathname + window.location.hash);
   }, [refreshMe]);
 
+  // If the server says the sign-in has gone (a restart, or the cookie ran out), any page sends the person back to the start.
+  useEffect(() => {
+    const out = () => setMe(null);
+    window.addEventListener(SIGNED_OUT, out);
+    return () => window.removeEventListener(SIGNED_OUT, out);
+  }, []);
+
   // The tab title carries the number of things waiting, so it can be noticed from another tab.
   useEffect(() => {
     document.title = me && needs.badge > 0 ? `(${needs.badge}) Agent Shopper` : "Agent Shopper";
   }, [me, needs.badge]);
-  // Remember which pages were opened, for the checklist.
-  useEffect(() => {
-    if (me) markVisited(route);
-  }, [me, route]);
   // How many shoppers are working right now, for the dot beside "Town".
   useEffect(() => {
     if (!me) return;
@@ -180,7 +184,6 @@ export function App() {
           <nav className="links" aria-label="Main">{link("#/", "Home", "home")}{link("#/playground", "Playground", "playground")}<a href="#/town" className={page === "town" && !approve ? "on" : ""} aria-current={page === "town" && !approve ? "page" : undefined}>Town{shopping > 0 && <span className="live" aria-label={`${shopping} shopper${shopping === 1 ? "" : "s"} working now`}><i aria-hidden="true" />{shopping}</span>}</a>{link("#/shops", "Shops", "shops")}{link("#/wallet", "Wallet", "wallet")}{link("#/orders", "Orders", "orders")}</nav>
           <div className="navr">
             <button className="btn sm" onClick={() => setShowNew(true)}>New request</button>
-            <button className="btn2 sm" title="How it works" aria-label="How it works" onClick={() => { setGuideHidden(false); window.location.hash = "#/"; window.scrollTo({ top: 0 }); }}>?</button>
             <button className="btn2 sm" onClick={togglePause}>{me.paused ? "Resume" : "Pause all"}</button>
             <button className="btn2 sm" onClick={signOut}>Sign out</button>
           </div>
@@ -198,8 +201,8 @@ export function App() {
         : page === "shops" ? <Shops minScore={70} />
         : page === "wallet" ? <Wallet me={me} refreshMe={refreshMe} />
         : page === "orders" ? <Orders refreshMe={refreshMe} />
-        : <Home me={me} refreshMe={refreshMe} onNew={() => setShowNew(true)} />}
-      {showNew && <NewRequest onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); setVersion((v) => v + 1); void refreshMe(); }} />}
+        : <Home me={me} refreshMe={refreshMe} onNew={() => setShowNew(true)} startId={startId} onStarted={() => setStartId(null)} />}
+      {showNew && <NewRequest onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); setStartId(id); window.location.hash = "#/"; setVersion((v) => v + 1); void refreshMe(); }} />}
     </div>
   );
 }

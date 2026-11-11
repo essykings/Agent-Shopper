@@ -333,6 +333,7 @@ function guarded(model: ModelPort, over: Partial<Limits> = {}) {
         throw new Error("no network in this test");
       },
       now: () => new Date("2026-11-11T12:00:00Z"),
+      minSearches: 0,
       limits: limits(over),
     },
   };

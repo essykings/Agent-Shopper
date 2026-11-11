@@ -1,28 +1,11 @@
-import { useState } from "react";
-import { ApiError, api } from "./api";
+import { api } from "./api";
 import type { Shop } from "./api";
 import { Intro, Note, Pill, letter, useLoad } from "./ui";
 
-const CHOICES: Array<{ value: Shop["status"]; label: string }> = [
-  { value: "allowed", label: "Allowed" },
-  { value: "ask_every_time", label: "Ask me" },
-  { value: "blocked", label: "Blocked" },
-];
-
 export function Shops({ minScore }: { minScore: number }) {
   const shops = useLoad(() => api<{ shops: Shop[] }>("GET", "/api/shops"));
-  const [error, setError] = useState<string | null>(null);
   const list = shops.data?.shops ?? [];
-
-  async function choose(id: string, status: Shop["status"]) {
-    setError(null);
-    try {
-      await api("PUT", `/api/shops/${id}`, { status });
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save that.");
-    }
-    shops.reload();
-  }
+  const trusted = list.filter((s) => s.score >= minScore).length;
 
   return (
     <>
@@ -30,42 +13,43 @@ export function Shops({ minScore }: { minScore: number }) {
         <Intro
           label="Shops"
           title={<>Where your<br />shopper can buy.</>}
-          sub="It only buys from shops you allow, and checks each one again before every purchase."
+          sub="Every shop gets a trust score before your shopper buys from it. Open a shop to see what it sells."
           panel={
             <div className="panel">
-              <span className="tag">Your shop list</span>
+              <span className="tag">Shop scores</span>
               <div className="figs">
-                {CHOICES.map((c) => (
-                  <div key={c.value}><div className="fig">{list.filter((s) => s.status === c.value).length}</div><div className="lab" style={{ marginTop: 6 }}>{c.label}</div></div>
-                ))}
+                <div><div className="fig">{trusted}</div><div className="lab" style={{ marginTop: 6 }}>Trusted</div></div>
+                <div><div className="fig">{list.length - trusted}</div><div className="lab" style={{ marginTop: 6 }}>Not trusted</div></div>
               </div>
+              <p className="s" style={{ margin: "14px 0 0" }}>A shop needs {minScore} out of 100 or more.</p>
             </div>
           }
         />
       </div>
       <main className="body">
         <div className="wrap">
-          {(error || shops.error) && <div style={{ marginBottom: 24 }}><Note tone="err">{error ?? shops.error}</Note></div>}
+          {shops.error && <div style={{ marginBottom: 24 }}><Note tone="err">{shops.error}</Note></div>}
+          <section className="card" style={{ marginBottom: 28 }}>
+            <h2 className="h2">How the score works</h2>
+            <p className="s" style={{ margin: "8px 0 0" }}>
+              The score is the shop's trust rating out of 100. It comes from how old the site is, how real its reviews look, and whether its pages try to trick an AI.
+              Your shopper never buys from a shop that scores under {minScore}, and it checks the score again before every purchase.
+            </p>
+          </section>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 28 }}>
             {list.map((s) => (
               <section className="card" key={s.id} style={{ boxShadow: "5px 5px 0 #2B1F3D" }}>
                 <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
                   <div className="mono">{letter(s.name)}</div>
                   <div className="grow" style={{ minWidth: 0 }}>
-                    <div className="t" style={{ fontSize: 18 }}>{s.name}</div>
+                    <div className="t" style={{ fontSize: 18 }}>
+                      {s.url ? <a href={s.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "underline" }}>{s.name}<span aria-hidden="true"> ↗</span><span className="sr"> (opens the shop in a new tab)</span></a> : s.name}
+                    </div>
                     <div className="s">{s.tagline}</div>
                   </div>
                   <Pill tone={s.score >= minScore ? "ok" : "bad"}>Score {s.score}</Pill>
                 </div>
-                <ul className="steps" style={{ marginTop: 12 }}>
-                  {s.findings.length === 0 && <li>No warning signs found.</li>}
-                  {s.findings.slice(0, 4).map((f, i) => <li key={i}>⚠ {f}</li>)}
-                </ul>
-                <div className="seg" role="group" aria-label={`Choice for ${s.name}`} style={{ marginTop: 14 }}>
-                  {CHOICES.map((c) => (
-                    <button key={c.value} className={s.status === c.value ? "on" : ""} aria-pressed={s.status === c.value} onClick={() => choose(s.id, c.value)}>{c.label}</button>
-                  ))}
-                </div>
+                {s.url && <p style={{ margin: "10px 0 0", fontSize: 14 }}><a href={s.url} target="_blank" rel="noopener noreferrer"><b>Visit {s.name}</b> ↗</a></p>}
               </section>
             ))}
           </div>

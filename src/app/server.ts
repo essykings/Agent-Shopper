@@ -51,6 +51,22 @@ const shops: ShopRef[] = [
   { id: "trailhead", baseUrl: shopUrl("SHOP_TRAILHEAD_URL", "http://trailhead.localhost:4103") },
 ];
 
+// Where people's browsers open each shop. On Render the addresses above are private, so these are the public ones.
+const publicShop = (name: string, ref: ShopRef): string => {
+  const given = env[name]?.trim();
+  if (!given) return ref.baseUrl;
+  try {
+    return new URL(given).toString().replace(/\/$/, "");
+  } catch {
+    return fail(`${name} must be a full address such as https://agent-shopper-northgear.onrender.com`);
+  }
+};
+const shopLinks: Record<string, string> = {
+  northgear: publicShop("SHOP_NORTHGEAR_PUBLIC_URL", shops[0]!),
+  "deal-zone": publicShop("SHOP_DEAL_ZONE_PUBLIC_URL", shops[1]!),
+  trailhead: publicShop("SHOP_TRAILHEAD_PUBLIC_URL", shops[2]!),
+};
+
 const port = Number(env["PORT"] ?? 3000);
 // PayPal sends people back to this address after they approve, so it must be the address people really use.
 // Render tells each web service its own address in RENDER_EXTERNAL_URL, so PUBLIC_URL only needs setting for a custom domain.
@@ -81,6 +97,7 @@ const api = createApi(pool, {
   sessionSecret,
   secureCookies: production,
   publicUrl,
+  shopLinks,
   ...(env["DIAG_TOKEN"]?.trim() ? { diagToken: env["DIAG_TOKEN"].trim() } : {}),
   demoVaultId: env["DEMO_VAULT_ID"]?.trim() || env["VAULT_ID"]?.trim() || (mock ? "MOCK-VAULT" : need("DEMO_VAULT_ID")),
   mock,

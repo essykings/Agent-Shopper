@@ -8,6 +8,8 @@
 import { CATEGORIES, MASTER } from "./master.ts";
 import type { MasterItem } from "./master.ts";
 
+import { keywords } from "../shared/words.ts";
+
 export type Behavior = "honest" | "scam" | "flexible";
 
 export interface Product {
@@ -271,17 +273,34 @@ export function findProduct(shop: ShopDef, key: string): Product | undefined {
   return shop.products.find((p) => p.key === key);
 }
 
-/** Words in the search box that count as a match: lower case, a trailing "s" ignored. */
-const words = (s: string): string[] => s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 1).map((w) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w));
-
-/** Products whose name, description or category contain every word searched for (all products when the search is empty). */
+/** Products whose name, description or category contain every word searched for (all products when the search is empty). Filler words like "for" are ignored. */
 export function searchProducts(shop: ShopDef, query: string, category?: string): Product[] {
-  const wanted = words(query);
+  const wanted = keywords(query);
   return shop.products.filter((p) => {
     if (category && p.category !== category) return false;
-    const hay = words(`${p.name} ${p.blurb} ${p.category}`);
+    const hay = keywords(`${p.name} ${p.blurb} ${p.category}`);
     return wanted.every((w) => hay.some((h) => h.startsWith(w)));
   });
+}
+
+/**
+ * The search a shop really offers. If nothing contains every word, it falls back to the closest matches: products
+ * containing at least half of the words, the best matches first. "exact" says which of the two this is.
+ */
+export function searchShop(shop: ShopDef, query: string, category?: string): { products: Product[]; exact: boolean } {
+  const exact = searchProducts(shop, query, category);
+  const wanted = keywords(query);
+  if (exact.length > 0 || wanted.length < 2) return { products: exact, exact: true };
+  const need = Math.ceil(wanted.length / 2);
+  const scored = shop.products
+    .filter((p) => !category || p.category === category)
+    .map((p) => {
+      const hay = keywords(`${p.name} ${p.blurb} ${p.category}`);
+      return { p, hits: wanted.filter((w) => hay.some((h) => h.startsWith(w))).length };
+    })
+    .filter((x) => x.hits >= need)
+    .sort((a, b) => b.hits - a.hits);
+  return { products: scored.map((x) => x.p), exact: scored.length === 0 };
 }
 
 /** What the box really holds when the wrong item is shipped. */

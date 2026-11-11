@@ -71,6 +71,13 @@ services:
           type: web
           name: agent-shopper-trailhead
           property: hostport
+      # The shops' public addresses, for the links on the Shops page. They must match the addresses Render shows for each shop.
+      - key: SHOP_NORTHGEAR_PUBLIC_URL
+        value: https://agent-shopper-northgear.onrender.com
+      - key: SHOP_DEAL_ZONE_PUBLIC_URL
+        value: https://agent-shopper-deal-zone.onrender.com
+      - key: SHOP_TRAILHEAD_PUBLIC_URL
+        value: https://agent-shopper-trailhead.onrender.com
 
   # ---- the three simulated shops: one site each, so an agent really visits separate sites ----
   - type: web

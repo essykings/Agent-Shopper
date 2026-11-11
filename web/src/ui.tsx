@@ -25,9 +25,9 @@ export function Pill({ tone, children }: { tone: "ok" | "warn" | "bad"; children
   return <span className={`pill p-${tone}`}>{children}</span>;
 }
 
-export function Intro({ label, title, sub, panel }: { label: string; title: ReactNode; sub: string; panel?: ReactNode }) {
+export function Intro({ label, title, sub, panel, middle }: { label: string; title: ReactNode; sub: string; panel?: ReactNode; middle?: boolean }) {
   return (
-    <section className="intro wrap">
+    <section className={`intro wrap${middle ? " mid" : ""}`}>
       <div style={{ flex: "1 1 420px", minWidth: 0 }}>
         <div className="lab">{label}</div>
         <h1 className="h1" style={{ marginTop: 14 }}>{title}</h1>
@@ -55,7 +55,7 @@ export const letter = (s: string): string => s.trim().charAt(0).toUpperCase() ||
 
 export const KIND_LABEL: Record<string, string> = {
   allowance_set: "Allowance set",
-  set_aside: "Set aside for a request",
+  set_aside: "Held for a request",
   set_aside_release: "Set-aside released",
   guard_allow: "Checked and allowed",
   guard_ask: "Needs your OK",

@@ -3,7 +3,7 @@
 
 import { Hono } from "hono";
 import type { Pool } from "../server/db.ts";
-import { findProduct, searchProducts } from "./catalog.ts";
+import { findProduct, searchShop } from "./catalog.ts";
 import type { ShopDef } from "./catalog.ts";
 import { renderAbout, renderNotFound, renderOrder, renderProduct, renderSearch, renderShopHome } from "./pages.ts";
 import type { Sort } from "./pages.ts";
@@ -37,7 +37,8 @@ export function createShopApp(pool: Pool, shop: ShopDef, opts: { now?: () => Dat
     const sortParam = c.req.query("sort");
     const sort: Sort = sortParam === "price" || sortParam === "price-desc" ? sortParam : "relevance";
     const page = Math.min(Math.max(Number.parseInt(c.req.query("page") ?? "1", 10) || 1, 1), 1000);
-    return c.html(renderSearch(shop, q, category, searchProducts(shop, q, category), await getPriceAdjust(pool, shop.id), now(), { page, sort }));
+    const found = searchShop(shop, q, category);
+    return c.html(renderSearch(shop, q, category, found.products, await getPriceAdjust(pool, shop.id), now(), { page, sort, closest: !found.exact }));
   });
 
   app.get("/about", (c) => c.html(renderAbout(shop)));

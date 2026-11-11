@@ -208,7 +208,7 @@ export function renderSearch(
   results: Product[],
   adjustPct: number,
   now: Date,
-  view: { page: number; sort: Sort } = { page: 1, sort: "relevance" },
+  view: { page: number; sort: Sort; closest?: boolean } = { page: 1, sort: "relevance" },
 ): string {
   const total = (p: Product): number => priceNow(p, adjustPct) + p.shippingCents;
   const sorted = view.sort === "price" ? [...results].sort((a, b) => total(a) - total(b)) : view.sort === "price-desc" ? [...results].sort((a, b) => total(b) - total(a)) : results;
@@ -229,7 +229,7 @@ export function renderSearch(
   const pager = pages > 1
     ? `<p class="muted">${page > 1 ? `<a href="${escapeHtml(link({ page: page - 1 }))}">Previous page</a> · ` : ""}Page ${page} of ${pages}.${page < pages ? ` <a href="${escapeHtml(link({ page: page + 1 }))}">Next page</a>. Add &amp;page=${page + 1} to the address for the next page.` : ""}</p>`
     : "";
-  const body = `<h2>${sorted.length} result${sorted.length === 1 ? "" : "s"}${escapeHtml(what)}</h2>${categoryLinks(shop, category)}${sorted.length ? `${sortLinks}<p class="muted">Showing ${(page - 1) * PER_PAGE + 1} to ${(page - 1) * PER_PAGE + shown.length} of ${sorted.length}.</p><div class="grid">${productCards(shop, shown, adjustPct, now)}</div>${pager}` : `<p>Nothing matched. Try fewer words, or <a href="/">see the departments</a>.</p>`}`;
+  const body = `<h2>${sorted.length} result${sorted.length === 1 ? "" : "s"}${escapeHtml(what)}</h2>${categoryLinks(shop, category)}${sorted.length ? `${view.closest ? `<p class="muted">Nothing matched every word, so these are the closest matches.</p>` : ""}${sortLinks}<p class="muted">Showing ${(page - 1) * PER_PAGE + 1} to ${(page - 1) * PER_PAGE + shown.length} of ${sorted.length}.</p><div class="grid">${productCards(shop, shown, adjustPct, now)}</div>${pager}` : `<p>Nothing matched. Try fewer words, or <a href="/">see the departments</a>.</p>`}`;
   return layout(shop, "Search", body);
 }
 
