@@ -20,6 +20,37 @@ export function createPool(connectionString: string, schema?: string): Pool {
   });
 }
 
+/**
+ * Waits until the database answers. On a host that creates the database and the services together (Render does),
+ * a service can start a minute or two before the database is ready, and must not give up on the first refusal.
+ * Gives up with a plain message after timeoutMs (3 minutes by default), so a database that is truly down still fails loudly.
+ */
+export async function waitForDatabase(
+  pool: Pick<pg.Pool, "query">,
+  opts: { timeoutMs?: number; intervalMs?: number; log?: (message: string) => void } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const intervalMs = opts.intervalMs ?? 3_000;
+  const started = Date.now();
+  let lastTold = -Infinity;
+  for (;;) {
+    try {
+      await pool.query("select 1");
+      if (lastTold > -Infinity) opts.log?.(`The database is ready (after ${Math.round((Date.now() - started) / 1000)}s).`);
+      return;
+    } catch (err) {
+      const waited = Date.now() - started;
+      const why = err instanceof Error ? err.message : String(err);
+      if (waited >= timeoutMs) throw new Error(`The database did not answer within ${Math.round(timeoutMs / 1000)} seconds. Last error: ${why}`);
+      if (waited - lastTold >= 10_000) {
+        opts.log?.(`Waiting for the database (${Math.round(waited / 1000)}s so far): ${why}`);
+        lastTold = waited;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, Math.max(1, timeoutMs - waited))));
+    }
+  }
+}
+
 /** Runs every new .sql file in db/migrations, in name order, each in its own transaction. */
 export async function migrate(pool: Pool): Promise<string[]> {
   // Several services (the app and each shop) start together and all run migrations, so take a lock:

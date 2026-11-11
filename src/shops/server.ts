@@ -4,7 +4,7 @@
 //   On your machine: SHOPS_LOCAL=1 starts all three shops and the control panel on fixed ports.
 
 import { serve } from "@hono/node-server";
-import { createPool, migrate } from "../server/db.ts";
+import { createPool, migrate, waitForDatabase } from "../server/db.ts";
 import { SHOPS, findShop } from "./catalog.ts";
 import { createControlApp } from "./control-app.ts";
 import { createShopApp } from "./shop-app.ts";
@@ -17,6 +17,7 @@ if (!databaseUrl) {
 }
 
 const pool = createPool(databaseUrl);
+await waitForDatabase(pool, { log: console.log });
 await migrate(pool);
 await seedShops(pool, process.env.SHOP_PAYEE_EMAIL ?? "shops@example.com");
 

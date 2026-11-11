@@ -3,7 +3,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { createPool, migrate } from "./db.ts";
+import { waitForDatabase, createPool, migrate } from "./db.ts";
 import type { Pool } from "./db.ts";
 import { appendLedger, listLedger } from "./ledger.ts";
 import { getBalances } from "./balances.ts";
@@ -180,3 +180,49 @@ test("the database refuses a request whose set-aside is below its maximum price"
   await assert.rejects(createMandate(pool, request(user, 30000, { maxPriceCents: 40000, askAboveCents: 30000 })));
   assert.equal((await getBalances(pool, user)).setAsideCents, 0);
 });
+
+// ---------- waiting for the database to come up (no database needed: the pool here is a stand-in) ----------
+
+const refusing = (times: number) => {
+  let calls = 0;
+  return {
+    get calls() { return calls; },
+    query: async () => {
+      calls++;
+      if (calls <= times) throw Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432"), { code: "ECONNREFUSED" });
+      return { rows: [{ "?column?": 1 }] };
+    },
+  } as unknown as Parameters<typeof waitForDatabase>[0] & { calls: number };
+};
+
+test("a service waits for a database that is still starting, instead of giving up on the first refusal", async () => {
+  const pool = refusing(4);
+  const said: string[] = [];
+  await waitForDatabase(pool, { timeoutMs: 5_000, intervalMs: 5, log: (m) => said.push(m) });
+  assert.equal(pool.calls, 5, "tried again after each refusal, and stopped at the first success");
+  assert.match(said[0] ?? "", /Waiting for the database \(0s so far\): connect ECONNREFUSED/);
+  assert.match(said.at(-1) ?? "", /The database is ready/);
+});
+
+test("a database that is already up is not waited for, and nothing is logged", async () => {
+  const pool = refusing(0);
+  const said: string[] = [];
+  await waitForDatabase(pool, { timeoutMs: 1_000, intervalMs: 5, log: (m) => said.push(m) });
+  assert.equal(pool.calls, 1);
+  assert.deepEqual(said, []);
+});
+
+test("a database that never answers fails loudly after the time allowed, with the last error", async () => {
+  const pool = refusing(Infinity);
+  const started = Date.now();
+  await assert.rejects(waitForDatabase(pool, { timeoutMs: 120, intervalMs: 10 }), /did not answer within 0 seconds\. Last error: connect ECONNREFUSED/);
+  const took = Date.now() - started;
+  assert.ok(took >= 100 && took < 1_000, `gave up after ${took} ms`);
+  assert.ok(pool.calls >= 3, "kept trying until the time ran out");
+});
+
+test("the wait does not hide a different problem for longer than allowed, and a wrong password is not retried forever", async () => {
+  const wrong = { query: async () => { throw new Error('password authentication failed for user "x"'); } } as unknown as Parameters<typeof waitForDatabase>[0];
+  await assert.rejects(waitForDatabase(wrong, { timeoutMs: 60, intervalMs: 5 }), /Last error: password authentication failed/);
+});
+

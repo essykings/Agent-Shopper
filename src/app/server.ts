@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { Hono } from "hono";
 import { createPageFetcher } from "../agent/pages.ts";
 import type { ModelPort, ShopRef } from "../agent/shopper.ts";
-import { createPool, migrate } from "../server/db.ts";
+import { createPool, migrate, waitForDatabase } from "../server/db.ts";
 import { FakePayPal } from "../server/fake-paypal.ts";
 import { limitsFromEnv, pruneAdmissions } from "../server/limits.ts";
 import { createPayPalClient } from "../server/paypal.ts";
@@ -57,6 +57,7 @@ const port = Number(env["PORT"] ?? 3000);
 const publicUrl = (env["PUBLIC_URL"]?.trim() || env["RENDER_EXTERNAL_URL"]?.trim() || (production ? fail("PUBLIC_URL must be set when NODE_ENV=production, for example https://your-app.onrender.com.") : `http://localhost:${port}`)).replace(/\/$/, "");
 
 const pool = createPool(need("DATABASE_URL"));
+await waitForDatabase(pool, { log: console.log });
 await migrate(pool);
 await seedShops(pool, env["SHOP_PAYEE_EMAIL"]?.trim() || (mock ? "shop@example.com" : need("SHOP_PAYEE_EMAIL")));
 
