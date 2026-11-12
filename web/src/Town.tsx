@@ -131,12 +131,20 @@ export function Scene({ world, homeLabel, empty, finished = null, finishedLabel 
     const seen = new Map<string, number>();
     const total = new Map<string, number>();
     for (const a of list) total.set(keyOf(a.place), (total.get(keyOf(a.place)) ?? 0) + 1);
+    // Agents at the same spot stand in up to two columns, far enough apart that one's speech bubble never covers another's name tag.
     return list.map((a) => {
       const k = keyOf(a.place);
       const i = seen.get(k) ?? 0;
       seen.set(k, i + 1);
+      const n = total.get(k) ?? 1;
+      // The guard and PayPal stand in a narrow lane between buildings, so there agents queue in one column. Elsewhere there is room for two.
+      const narrow = a.place.kind === "gate" || a.place.kind === "bank";
+      const cols = !narrow && n > 3 ? 2 : 1;
+      const rows = Math.ceil(n / cols);
+      const step = Math.min(76, 400 / rows);
       const [x, y] = standOf(a.place);
-      return { a, x: x - i * 22, y: y + (i - ((total.get(k) ?? 1) - 1) / 2) * 52 };
+      const away = a.place.kind === "home" ? 1 : -1; // the second column goes into the free space beside the spot
+      return { a, x: x + away * (i % cols) * 140, y: y + (Math.floor(i / cols) - (rows - 1) / 2) * step };
     });
   }, [world.agents]);
   const coinFrom = standOf({ kind: "bank" });

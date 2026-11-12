@@ -88,6 +88,34 @@ export function describe(e: WorldEvent): { text: string; tone: Tone } {
   }
 }
 
+/**
+ * The few words an agent's speech bubble shows. The full sentence (describe) goes in the step list. The map already shows
+ * where the agent stands, so the bubble leaves out the shop's name, and a payment is just the amount.
+ */
+export function bubbleText(e: WorldEvent): string {
+  switch (e.type) {
+    case "start": return e.item ? `Wants: ${e.item}` : "Started";
+    case "visit":
+      if (e.page === "home") return "Looking around";
+      if (e.page === "search") return e.label ? `Searching "${e.label}"` : "Searching";
+      if (e.page === "product") return e.label ?? "Reading a page";
+      if (e.page === "about") return "Reading reviews";
+      return "Reading a page";
+    case "seller": return e.hiddenText ? "Hidden text found" : `Score ${e.score}`;
+    case "propose": return `Proposes ${money(e.totalCents)}`;
+    case "guard": return e.decision === "allow" ? "Allowed" : e.decision === "ask" ? "Needs OK" : "Turned down";
+    case "giveup": return "Nothing fits";
+    case "pay":
+      if (e.step === "start") return e.totalCents ? money(e.totalCents) : "Paying";
+      if (e.step === "done") return "Paid";
+      return "Payment failed";
+    case "end":
+      if (e.result === "bought") return "Bought";
+      if (e.result === "asked") return "Waiting for OK";
+      return "Nothing bought";
+  }
+}
+
 /** How long an event stays on screen before the same agent's next one is shown. */
 export function stepDelay(e: WorldEvent): number {
   switch (e.type) {
@@ -120,7 +148,7 @@ export function applyFeed(w: World, f: Feed, now: number): World {
     runId: f.runId,
     name: f.agent,
     place: placeFor(e, prev?.place ?? { kind: "home" }),
-    bubble: d.text,
+    bubble: bubbleText(e),
     tone: d.tone,
     replay: !!f.replay,
     sample: !!f.sample,

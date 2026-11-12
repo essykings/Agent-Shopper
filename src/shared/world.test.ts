@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Feed, WorldEvent } from "./events.ts";
-import { LEAVE_MS, Player, applyFeed, describe, emptyWorld, expire } from "./world.ts";
+import { LEAVE_MS, Player, applyFeed, bubbleText, describe, emptyWorld, expire } from "./world.ts";
 
 const feed = (runId: string, event: WorldEvent, extra: Partial<Feed> = {}): Feed => ({ runId, agent: `Agent ${runId.toUpperCase()}`, at: 0, event, ...extra });
 
@@ -24,6 +24,17 @@ test("every kind of event has plain words, and a private reason shows only when 
   assert.match(describe({ type: "guard", shopId: "x", decision: "deny", reason: "Score 0 is low" }).text, /Score 0 is low/);
   assert.doesNotMatch(describe({ type: "guard", shopId: "x", decision: "deny" }).text, /:/);
   assert.equal(describe({ type: "propose", shopId: "northgear", item: "Wireless earbuds", totalCents: 4500 }).text, "Proposing Wireless earbuds from Northgear for $45.00");
+});
+
+test("a speech bubble is only a few words: no shop name, and a payment is just the amount", () => {
+  assert.equal(bubbleText({ type: "pay", step: "start", shopId: "trailhead", totalCents: 3800 }), "$38.00");
+  assert.equal(bubbleText({ type: "start", item: "USB-C hub" }), "Wants: USB-C hub");
+  assert.equal(bubbleText({ type: "visit", shopId: "northgear", page: "product", label: "Webcam, 1080p" }), "Webcam, 1080p");
+  assert.equal(bubbleText({ type: "seller", shopId: "deal-zone", score: 0, ok: false, hiddenText: true }), "Hidden text found");
+  assert.equal(bubbleText({ type: "guard", shopId: "x", decision: "deny", reason: "private reason" }), "Turned down");
+  const w = applyFeed(emptyWorld(), feed("a", { type: "pay", step: "start", shopId: "trailhead", totalCents: 1800 }), 0);
+  assert.equal(w.agents["a"]!.bubble, "$18.00");
+  assert.match(w.log[0]!.text, /Paying Trailhead \$18\.00 through PayPal/, "the step list keeps the full sentence");
 });
 
 test("an agent walks to where each step happens, and the badges light up", () => {
