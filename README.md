@@ -42,11 +42,11 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Eve
 
 ## Run it yourself (no keys, no cost)
 
-Needs Node 24.22.1 (see `.nvmrc`) and Docker for Postgres.
+Needs Node 24.22.1 (see `.nvmrc`; with nvm, run `nvm use`) and Docker for Postgres.
 
 ```bash
 npm ci
-docker compose up -d                 # Postgres on 127.0.0.1:54329. If your Docker has no `compose`, use:
+docker compose up -d                 # Postgres on 127.0.0.1:54329. If your Docker has no `compose`, or it fails (for example "client version is too old"), use:
 # docker run -d --name agent-shopper-db -e POSTGRES_USER=shopper -e POSTGRES_PASSWORD=shopper -e POSTGRES_DB=agent_shopper -p 127.0.0.1:54329:5432 postgres:15
 cp .env.example .env                 # the local DATABASE_URL in it already matches
 npm run web:build                    # builds the screens
