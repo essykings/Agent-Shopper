@@ -36,8 +36,6 @@ services:
         value: production
       - key: PORT
         value: "10000"
-      - key: MOCK_SERVICES
-        value: "1"
       # The built-in default is ONE shopper run at a time for the whole app, which would make a second visitor wait.
       - key: LIMIT_MAX_CONCURRENT
         value: "3"
