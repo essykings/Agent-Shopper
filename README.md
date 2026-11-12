@@ -2,7 +2,7 @@
 
 **An AI agent that shops for you with PayPal, where plain code, not the AI, decides whether any money moves.**
 
-You tell it what to buy ("wireless earbuds", "a Christmas gift for Dad who likes hiking") and set the rules: a price limit, a deadline, a minimum shop trust score, categories it must never buy. The agent browses shops, avoids the scam shop, and proposes a purchase. A rules engine (the *guard*, ordinary code with no model in it) then checks the proposal and decides: allow, ask you first, or refuse. Only then does PayPal move money. After the purchase, the app watches for problems (a price drop, the wrong item) and builds the case for a refund, which you approve with one press.
+You tell it what to buy ("wireless earbuds", "a Christmas gift for Dad who likes hiking") and set the rules: a price limit, a deadline, and a minimum shop trust score. The agent browses shops, avoids the scam shop, and proposes a purchase. A rules engine (the *guard*, ordinary code with no model in it) then checks the proposal and decides: allow, ask you first, or refuse. Only then does PayPal move money. After the purchase, the app watches for problems (a price drop, the wrong item) and builds the case for a refund, which you approve with one press.
 
 Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Everything uses the **PayPal sandbox**: no real money moves.
 
@@ -12,7 +12,7 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Eve
 |---|---|
 | PayPal sandbox: saved-account charges (Vault), authorize and capture, Payouts to shops, refunds, webhook verification | The three shops (Northgear, Deal-Zone, Trailhead). They are small websites in this repo, about 100 products each. Nobody ships anything. |
 | Claude (Haiku 5.5) driving the shopper, reading shop pages as text and links, exactly as a browsing agent would | The scam: Deal-Zone has a new domain, copied five-star reviews, prices far too low, and hidden text aimed at AI readers |
-| A guard, a payment service, an append-only ledger and per-address abuse limits | "What arrived": in the demo, the shop's delivery record says what it shipped, and the owner's control panel makes a shop ship the wrong item or change its price |
+| A guard, a payment service, an append-only ledger and per-address abuse limits | "What arrived": orders ship and are delivered on their own timeline (shipped within hours, delivered in one to two days), the shop's delivery record says what it shipped, and the owner's control panel makes a shop ship the wrong item or change its price |
 
 ## How it works
 
@@ -30,7 +30,7 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Eve
 - **Prompt-injection defence.** Page text is untrusted. Hidden text aimed at AI readers is detected and lowers the shop's score, and the agent is told never to follow instructions found in a page.
 - **Safe by default.** An unknown shop is refused. A guard that cannot decide says "ask", never "allow". Money is whole cents. The ledger cannot be edited (database triggers). One live order per request is enforced by the database.
 - **Gifts.** A request can be a goal instead of an item. The agent suggests up to three gifts with reasons, every hard rule still applies, and the guard always asks you to choose.
-- **Aftercare.** The app finds a price drop inside a shop's price-protection window or a wrong item, collects an evidence pack (the listing as saved with a fingerprint, the order, the delivery record, the shop's policy, a timeline), and refunds a price drop automatically, without a button, because a price on a shop's page is a fact the code can check. A wrong item is different: only you know what arrived, so the app asks you to confirm before it refunds. The amount is worked out again at that moment and can never exceed what is left of the payment. If an automatic refund fails it is tried again a few times, then left for you to press the button, and a notification tells you what happened either way. (`AUTO_REFUND=0` turns automatic refunds off.)
+- **Aftercare.** The app finds a price drop inside a shop's price-protection window or a wrong item, collects an evidence pack (the listing as saved with a fingerprint, the order, the delivery record, the shop's policy, a timeline), and refunds a price drop automatically, without a button, because a price on a shop's page is a fact the code can check. A delivery problem is different: when an order is delivered the app asks you, in neutral words, to confirm it arrived as ordered. Only you know what arrived, so a refund follows only if you report a problem and the shop's own delivery record agrees. The amount is worked out again at that moment and can never exceed what is left of the payment. If an automatic refund fails it is tried again a few times, then left for you to press the button, and a notification tells you what happened either way. (`AUTO_REFUND=0` turns automatic refunds off.)
 - **Live view.** The *Playground* shows your agent walking between shops, the guard and PayPal as it works. The public *Town square* shows every shopper anonymously: no typed text and no guard reasons are shown, and your own agents carry a "You" label for you alone.
 - **Abuse limits for a public demo.** Per-address and per-account daily limits on runs, sign-ups and purchases, a cap on concurrent runs, a daily model budget counted before each run starts, a token cap per run, and a kill switch.
 
@@ -58,7 +58,7 @@ npm run app:mock                     # the app on http://localhost:3000, with th
 Open http://localhost:3000 and press **Try the demo**. **Mock mode** uses a scripted shopper and a pretend PayPal, so the whole experience runs without any account or cost. Try:
 
 1. *New request*: "Wireless earbuds" and a price. The shopper starts at once; watch the map turn Deal-Zone down.
-2. Wait about a minute. In the demo, the shop cuts the price of your first order, and its record shows something different from what you ordered on your second. The shopper refunds the price drop automatically, and asks you what arrived before it refunds anything else. The message at the top of the page opens your notifications (the bell). The wait is `DEMO_EVENT_SECONDS` (default 60; 0 turns the scripted events off).
+2. Wait about a minute. In the demo, the shop cuts the price of your first order, and the shopper refunds the difference automatically. The message at the top of the page opens your notifications (the bell). The wait is `DEMO_EVENT_SECONDS` (default 60; 0 turns the scripted events off). Orders ship after about 6 hours and arrive after 24 to 48 hours, and then you are asked to confirm the delivery. To see that without waiting, set `SHIP_AFTER_HOURS=0 DELIVER_MIN_HOURS=0 DELIVER_MAX_HOURS=0` (or press **Deliver** for the order in the control panel).
 3. Or make it happen yourself: open the control panel (http://localhost:3000/control/), press **Drop 15%** for a shop, and your next check refunds the difference.
 4. Open http://localhost:3000/#/town in a second tab to see the public view.
 

@@ -8,7 +8,10 @@ import { applyDemoEvents } from "./demo-events.ts";
 import type { Pool } from "./db.ts";
 import { checkOrders, listCases, refundCase } from "./aftercare.ts";
 import type { AftercareDeps, CaseKind, RefundResult } from "./aftercare.ts";
+import { notifyDeliveries } from "./delivery.ts";
 import { notify } from "./notifications.ts";
+import { advanceShipping, REAL_DELIVERY } from "../shops/service.ts";
+import type { DeliveryTimes } from "../shops/service.ts";
 
 const MAX_ATTEMPTS = 3;
 const RETRY_AFTER_MINUTES = 10;
@@ -65,9 +68,14 @@ export async function refundOpenCases(pool: Pool, deps: AftercareDeps, opts: { u
   return done;
 }
 
-/** One pass for everyone: scripted demo events that are due, then every recent paid order is checked and (if refund is on) refunded if owed. */
-export async function runAftercareSweep(pool: Pool, deps: AftercareDeps, opts: { demoEventSeconds?: number } = {}, refund = true): Promise<{ events: number; refunds: number }> {
+/**
+ * One pass for everyone: scripted demo events that are due, orders shipped and delivered when their time has come (and the owner told
+ * to confirm a delivery), then every recent paid order is checked and (if refund is on) refunded if owed.
+ */
+export async function runAftercareSweep(pool: Pool, deps: AftercareDeps, opts: { demoEventSeconds?: number; delivery?: DeliveryTimes } = {}, refund = true): Promise<{ events: number; refunds: number }> {
   const events = await applyDemoEvents(pool, { delaySeconds: opts.demoEventSeconds ?? 0 });
+  await advanceShipping(pool, opts.delivery ?? REAL_DELIVERY);
+  await notifyDeliveries(pool);
   const users = await pool.query<{ user_id: string }>(
     "select distinct user_id from orders where status = any($1) and created_at > now() - make_interval(days => $2) limit 200",
     [PAID, LOOK_BACK_DAYS],

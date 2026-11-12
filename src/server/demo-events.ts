@@ -1,11 +1,9 @@
-// The demo's scripted shop events. A little while after a demo account's purchase, the shop does something the owner
-// should hear about, so a judge sees the aftercare story without finding any control panel and without luck:
-//   the account's first order: the shop cuts that order's price by 15% (a price drop)
-//   the account's second order: the shop ships the wrong item (the owner is then asked to confirm that is what arrived)
-// Only demo accounts get events. Each happens once, to one order, and never changes what other people see.
+// The demo's scripted shop event. A little while after a demo account's FIRST purchase, the shop cuts that order's price by 15%,
+// so a judge sees the aftercare story (the price drop, found and refunded automatically) without finding any control panel and
+// without luck. It happens once, to one order, and never changes what other people see. Only demo accounts get it.
+// (A delivery problem is not staged. The owner's control panel can still make a shop ship the wrong item, to test that path.)
 
 import type { Pool } from "./db.ts";
-import { ShopControlError, shipOrder } from "../shops/service.ts";
 
 export const DEMO_PRICE_CUT_PCT = 15;
 const PAID = ["captured", "payout_pending", "payout_failed", "paid_out"];
@@ -23,25 +21,14 @@ export async function applyDemoEvents(pool: Pool, opts: { delaySeconds: number }
        where u.paypal_source = 'demo' and o.status = any($2)
      )
      select order_id, n::int as n from ranked
-     where demo_event is null and n <= 2 and created_at <= now() - make_interval(secs => $1)
+     where demo_event is null and n = 1 and created_at <= now() - make_interval(secs => $1)
      order by created_at limit 100`,
     [opts.delaySeconds, PAID],
   );
   let applied = 0;
   for (const row of due.rows) {
-    try {
-      if (row.n === 1) {
-        await pool.query("update shop_orders set price_cut_pct = $2, demo_event = 'price_drop', updated_at = now() where order_id = $1 and demo_event is null", [row.order_id, DEMO_PRICE_CUT_PCT]);
-      } else {
-        await shipOrder(pool, row.order_id, true);
-        await pool.query("update shop_orders set demo_event = 'wrong_item' where order_id = $1 and demo_event is null", [row.order_id]);
-      }
-      applied++;
-    } catch (err) {
-      // A delivered order cannot be shipped wrong. Mark it so it is not tried again.
-      if (!(err instanceof ShopControlError)) throw err;
-      await pool.query("update shop_orders set demo_event = 'none' where order_id = $1 and demo_event is null", [row.order_id]);
-    }
+    await pool.query("update shop_orders set price_cut_pct = $2, demo_event = 'price_drop', updated_at = now() where order_id = $1 and demo_event is null", [row.order_id, DEMO_PRICE_CUT_PCT]);
+    applied++;
   }
   return applied;
 }

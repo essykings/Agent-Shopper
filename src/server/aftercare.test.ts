@@ -46,17 +46,22 @@ test("a refund is never more than is left of what was paid", () => {
   }
 });
 
-test("a wrong item is owed in full, once the shop has shipped something that is not what was listed", () => {
+test("a delivery problem is owed in full only when the order was delivered, the owner reported a problem, and the shop's own record agrees", () => {
   const wrong = (over: Partial<Parameters<typeof planWrongItem>[0]> = {}) =>
-    planWrongItem({ paidCents: 4500, refundedCents: 0, shopStatus: "shipped", shippedItem: "Cotton socks, size 8, white", listedName: "Trail socks, 3 pack", ...over });
+    planWrongItem({ paidCents: 4500, refundedCents: 0, shopStatus: "delivered", shippedItem: "Cotton socks, size 8, white", listedName: "Trail socks, 3 pack", deliveryAnswer: "problem", ...over });
   const p = wrong();
   assert.deepEqual([p.eligible, p.amountCents], [true, 4500]);
   assert.equal(p.reason, 'The shop\'s delivery record shows "Cotton socks, size 8, white" for your order of "Trail socks, 3 pack".');
   assert.doesNotMatch(p.reason, /wrong|sent/i, "the shop is not accused of anything");
-  assert.equal(wrong({ shopStatus: "delivered" }).eligible, true);
-  assert.equal(wrong({ shopStatus: "received" }).eligible, false, "not shipped yet");
+  assert.equal(wrong({ shopStatus: "shipped" }).eligible, false, "it has not arrived, so there is nothing to confirm");
+  assert.equal(wrong({ shopStatus: "received" }).eligible, false);
   assert.equal(wrong({ shopStatus: null }).eligible, false);
-  assert.match(wrong({ shippedItem: null }).reason, /matches what was listed/);
+  assert.match(wrong({ shopStatus: "shipped" }).reason, /not been delivered yet/);
+  assert.equal(wrong({ deliveryAnswer: null }).eligible, false, "nobody has said there is a problem");
+  assert.equal(wrong({ deliveryAnswer: "arrived" }).eligible, false, "the owner said it arrived as ordered");
+  assert.match(wrong({ deliveryAnswer: null }).reason, /No problem has been reported/);
+  assert.equal(wrong({ shippedItem: null }).eligible, false, "the shop's record matches, so a report alone is not enough");
+  assert.match(wrong({ shippedItem: null }).reason, /matches what was ordered/);
   assert.deepEqual([wrong({ refundedCents: 600 }).eligible, wrong({ refundedCents: 600 }).amountCents], [true, 3900], "only what is left");
   assert.equal(wrong({ refundedCents: 4500 }).eligible, false);
 });

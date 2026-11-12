@@ -85,12 +85,14 @@ export function evaluate(mandate: Mandate, proposal: Proposal, ctx: GuardContext
     add("deadline", "Arrives before your deadline", "pass", `Arrives ${proposal.deliveryBy}.`);
   }
 
-  // 7. Not something you never buy.
-  const blockedCategory = mandate.neverBuyCategories.find((c) => normalize(c) === normalize(proposal.category));
-  if (blockedCategory) {
-    add("category", "Not on your never-buy list", "deny", `${proposal.category} is on your never-buy list.`);
-  } else {
-    add("category", "Not on your never-buy list", "pass", `${proposal.category} is fine.`);
+  // 7. Not something you never buy. Only shown when a request carries a ban list; with no list there is nothing to check or to show.
+  if (mandate.neverBuyCategories.length > 0) {
+    const blockedCategory = mandate.neverBuyCategories.find((c) => normalize(c) === normalize(proposal.category));
+    if (blockedCategory) {
+      add("category", "Not on your never-buy list", "deny", `${proposal.category} is on your never-buy list.`);
+    } else {
+      add("category", "Not on your never-buy list", "pass", `${proposal.category} is fine.`);
+    }
   }
 
   // 8. Every claim is backed by words really on the saved page.

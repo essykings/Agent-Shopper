@@ -7,7 +7,7 @@ const notice = (id: string, kind: string, text: string) => ({ id, kind, text });
 
 const request = (over: Partial<NeedsRequest> = {}): NeedsRequest => ({ id: "r1", item: "Wireless earbuds", status: "active", hasOrder: false, ideas: 0, approval: null, recipient: null, ...over });
 const refund = (over: Partial<NeedsCase> = {}): NeedsCase => ({ id: "c1", orderId: "o1", kind: "price_drop", status: "open", amountCents: 600, itemName: "Wireless earbuds", shopName: "Northgear", failure: null, ...over });
-const input = (over: Partial<NeedsInput> = {}): NeedsInput => ({ paused: false, paymentSource: "demo", requests: [], cases: [], notices: [], autoRefund: false, ...over });
+const input = (over: Partial<NeedsInput> = {}): NeedsInput => ({ paused: false, paymentSource: "demo", requests: [], cases: [], deliveries: [], notices: [], autoRefund: false, ...over });
 const kinds = (items: NeedItem[]) => items.map((i) => i.kind);
 
 test("when nothing is waiting there is nothing to show", () => {
@@ -49,9 +49,9 @@ test("a refund the owner can claim is offered, with the larger claim when one or
   assert.deepEqual(price[0]!.action, { label: "Review the refund", href: "#/orders" });
   const both = needsYou(input({ cases: [refund(), refund({ id: "c2", kind: "wrong_item", amountCents: 4500 })] }));
   assert.equal(both.length, 1, "two claims on one payment show once");
-  assert.equal(both[0]!.text, "Please check your Wireless earbuds from Northgear. The shop's delivery record shows something different from what you ordered. Did you receive something different?");
-  assert.deepEqual(both[0]!.action, { label: "Check your order", href: "#/orders" }, "a possible mix-up is always a question for the owner");
-  assert.doesNotMatch(both[0]!.text, /wrong|sent/i, "the shop is not accused of anything");
+  assert.equal(both[0]!.text, "We could not refund $45.00 for Wireless earbuds from Northgear. You can refund it yourself.", "a delivery problem is only ever open because its refund was tried and failed");
+  assert.deepEqual(both[0]!.action, { label: "Open Orders", href: "#/orders" });
+  assert.doesNotMatch(both[0]!.text, /wrong|sent|something different/i, "the shop is not accused of anything");
   const separate = needsYou(input({ cases: [refund(), refund({ id: "c3", orderId: "o2", itemName: "Daypack", amountCents: 900 })] }));
   assert.equal(separate.length, 2, "different orders show separately");
 });
@@ -105,7 +105,7 @@ test("with automatic refunds, a refund on its way is not shown, and one that fai
   assert.deepEqual(waiting, [], "the app is already refunding it, so there is nothing for the owner to do");
   const failed = needsYou(input({ autoRefund: true, cases: [refund({ failure: "PayPal did not complete the refund." })] }));
   assert.deepEqual(kinds(failed), ["refund"]);
-  assert.equal(failed[0]!.text, "We could not refund $6.00 for Wireless earbuds from Northgear automatically. You can refund it yourself.");
+  assert.equal(failed[0]!.text, "We could not refund $6.00 for Wireless earbuds from Northgear. You can refund it yourself.");
   assert.deepEqual(failed[0]!.action, { label: "Open Orders", href: "#/orders" });
   assert.equal(failed[0]!.tone, "warn");
   // Without automatic refunds the old message stands.
@@ -136,12 +136,25 @@ test("decisions come before notices", () => {
   assert.equal(badgeCount(items), 2, "both count for the tab title");
 });
 
-test("with automatic refunds a wrong item is still asked, because only the owner knows what arrived", () => {
+test("with automatic refunds, a delivery problem whose refund failed is shown, while a price drop on its way is not", () => {
   const items = needsYou(input({ autoRefund: true, cases: [refund({ id: "w", kind: "wrong_item", orderId: "o9", amountCents: 4500 })] }));
   assert.deepEqual(kinds(items), ["refund"]);
-  assert.equal(items[0]!.text, "Please check your Wireless earbuds from Northgear. The shop's delivery record shows something different from what you ordered. Did you receive something different?");
+  assert.equal(items[0]!.text, "We could not refund $45.00 for Wireless earbuds from Northgear. You can refund it yourself.");
   assert.equal(items[0]!.tone, "warn");
   const both = needsYou(input({ autoRefund: true, cases: [refund({ id: "p", orderId: "o1" }), refund({ id: "w", kind: "wrong_item", orderId: "o9", amountCents: 4500 })] }));
-  assert.deepEqual(both.map((i) => i.id), ["refund:w"], "the price drop on its way is hidden; the question is not");
+  assert.deepEqual(both.map((i) => i.id), ["refund:w"], "the price drop on its way is hidden; the failed refund is not");
 });
 
+test("a delivered order that has not been confirmed asks the owner, in neutral words, once for each order", () => {
+  const one = needsYou(input({ deliveries: [{ orderId: "o1", itemName: "Mechanical keyboard", shopName: "Northgear" }] }));
+  assert.deepEqual(kinds(one), ["delivery"]);
+  assert.equal(one[0]!.text, "Your Mechanical keyboard from Northgear was delivered. Please confirm it arrived as ordered.");
+  assert.deepEqual(one[0]!.action, { label: "Confirm delivery", href: "#/orders" });
+  assert.doesNotMatch(one[0]!.text, /wrong|sent|record|something different/i, "no hint of a mix-up: the owner says what arrived");
+  const two = needsYou(input({ deliveries: [{ orderId: "o1", itemName: "A", shopName: "S" }, { orderId: "o2", itemName: "B", shopName: "S" }] }));
+  assert.deepEqual(two.map((i) => i.id), ["delivery:o1", "delivery:o2"]);
+  assert.deepEqual(visibleNeeds(one, "#/orders"), [], "on Orders, where the buttons are, the message is not repeated");
+  // After a decision (an approval) and refunds, before an unread notice.
+  const mixed = needsYou(input({ requests: [request({ id: "a", approval: { itemName: "x", shopName: "y", totalCents: 100 } })], deliveries: [{ orderId: "o1", itemName: "A", shopName: "S" }], notices: [notice("n1", "bought", "Bought it.")] }));
+  assert.deepEqual(kinds(mixed), ["approval", "delivery", "notice"]);
+});

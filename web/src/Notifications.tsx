@@ -7,7 +7,7 @@ import type { Notice } from "./api";
 import { CHANGED } from "./needs";
 import { Intro, Note, useLoad } from "./ui";
 
-const MARK: Record<Notice["kind"], string> = { bought: "✓", refunded: "↩", refund_failed: "!", not_found: "–", question: "?" };
+const MARK: Record<Notice["kind"], string> = { bought: "✓", refunded: "↩", refund_failed: "!", not_found: "–", confirm_delivery: "▣" };
 
 export function Notifications() {
   const list = useLoad(() => api<{ items: Notice[]; unread: number }>("GET", "/api/notifications"));
@@ -31,7 +31,7 @@ export function Notifications() {
         <Intro
           label="Notifications"
           title={<>What happened<br />while you were away.</>}
-          sub="Purchases, refunds and anything that needs an answer. Price drops are refunded for you, so this is where you hear about them."
+          sub="Purchases, deliveries to confirm, and refunds. Price drops are refunded for you, so this is where you hear about them."
         />
       </div>
       <main className="body">
@@ -48,7 +48,7 @@ export function Notifications() {
                     <div className="t">{n.text}{newOnOpen.current?.has(n.id) && <span className="newtag">New</span>}</div>
                     <div className="s">{when(n.createdAt)}</div>
                   </div>
-                  {n.href && n.href !== "#/notifications" && <a className="btn2 sm" href={n.href}>{n.kind === "not_found" ? "Go to my requests" : n.kind === "question" ? "Check your order" : "See it in Orders"}</a>}
+                  {n.href && n.href !== "#/notifications" && <a className="btn2 sm" href={n.href}>{n.kind === "not_found" ? "Go to my requests" : n.kind === "confirm_delivery" ? "Confirm delivery" : "See it in Orders"}</a>}
                 </div>
               ))}
             </div>

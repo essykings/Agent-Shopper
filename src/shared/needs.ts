@@ -1,7 +1,7 @@
 // What is waiting for the owner right now, worked out from what the app already knows. No screen code
 // here, so every state can be tested without a browser. The "Needs you" bar and the tab title use it.
 
-export type NeedKind = "payment" | "paused" | "ideas" | "approval" | "refund" | "notice";
+export type NeedKind = "payment" | "paused" | "ideas" | "approval" | "refund" | "delivery" | "notice";
 export type NeedTone = "plain" | "ok" | "warn" | "bad";
 export type NeedAction = { label: string; href: string } | { label: string; run: "resume" };
 
@@ -40,6 +40,13 @@ export interface NeedsCase {
   failure: string | null;
 }
 
+/** An order that has been delivered and not yet confirmed. */
+export interface NeedsDelivery {
+  orderId: string;
+  itemName: string;
+  shopName: string;
+}
+
 /** Something the owner has not read yet: what was bought, what was refunded, what went wrong. */
 export interface NeedsNotice {
   id: string;
@@ -52,6 +59,8 @@ export interface NeedsInput {
   paymentSource: "demo" | "own" | "none";
   requests: NeedsRequest[];
   cases: NeedsCase[];
+  /** Delivered orders the owner has not yet confirmed. */
+  deliveries: NeedsDelivery[];
   /** Unread notices, newest first. */
   notices: NeedsNotice[];
   /** Refunds are made automatically, so an open case is only worth the owner's attention once an automatic refund has failed. */
@@ -107,13 +116,23 @@ export function needsYou(input: NeedsInput): NeedItem[] {
       id: `refund:${c.id}`,
       kind: "refund",
       tone: input.autoRefund || c.kind === "wrong_item" ? "warn" : "ok",
+      // A delivery problem is only ever open here because a refund was tried and failed; a price drop only if refunds are not automatic.
       text:
-        c.kind === "wrong_item"
-          ? `Please check your ${c.itemName} from ${c.shopName}. The shop's delivery record shows something different from what you ordered. Did you receive something different?`
-          : input.autoRefund
-            ? `We could not refund ${money(c.amountCents)} for ${c.itemName} from ${c.shopName} automatically. You can refund it yourself.`
-            : `${c.shopName} dropped its price on ${c.itemName}. You can claim ${money(c.amountCents)}.`,
-      action: { label: c.kind === "wrong_item" ? "Check your order" : input.autoRefund ? "Open Orders" : "Review the refund", href: "#/orders" },
+        c.kind === "wrong_item" || input.autoRefund
+          ? `We could not refund ${money(c.amountCents)} for ${c.itemName} from ${c.shopName}. You can refund it yourself.`
+          : `${c.shopName} dropped its price on ${c.itemName}. You can claim ${money(c.amountCents)}.`,
+      action: { label: c.kind === "wrong_item" || input.autoRefund ? "Open Orders" : "Review the refund", href: "#/orders" },
+    });
+  }
+
+  // Delivered, and waiting for the owner to say it arrived as ordered. One line for each order.
+  for (const d of input.deliveries) {
+    items.push({
+      id: `delivery:${d.orderId}`,
+      kind: "delivery",
+      tone: "plain",
+      text: `Your ${d.itemName} from ${d.shopName} was delivered. Please confirm it arrived as ordered.`,
+      action: { label: "Confirm delivery", href: "#/orders" },
     });
   }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, money, when } from "./api";
 import type { CaseRow, Me, OrderRow } from "./api";
+import { CHANGED } from "./needs";
 import { Busy, Intro, Note, Pill, letter, useLoad } from "./ui";
 
 const STATUS: Record<string, { tone: "ok" | "warn" | "bad"; text: string }> = {
@@ -14,7 +15,7 @@ const STATUS: Record<string, { tone: "ok" | "warn" | "bad"; text: string }> = {
 
 const KIND: Record<CaseRow["kind"], { title: string; button: string }> = {
   price_drop: { title: "The price dropped", button: "Refund me the difference" },
-  wrong_item: { title: "Please check your order", button: "Yes, I received something different. Refund me" },
+  wrong_item: { title: "A problem with the delivery", button: "Refund me" },
   dispute: { title: "A dispute is open at PayPal", button: "" },
 };
 
@@ -101,6 +102,23 @@ export function Orders({ refreshMe, me }: { refreshMe?: () => void; me?: Me }) {
     refreshMe?.();
   }
 
+  // "Did it arrive as ordered?" A problem is refunded only when the shop's own record agrees; the answer says which it was.
+  async function confirmDelivery(o: OrderRow, arrived: boolean) {
+    setWorking(`delivery-${o.id}`);
+    setMessage(null);
+    try {
+      const r = await api<{ answer: string; refund: { status: string } | null; message: string }>("POST", `/api/orders/${o.id}/delivery`, { arrived });
+      setMessage({ tone: r.refund?.status === "refunded" || arrived ? "ok" : "warn", text: r.message });
+    } catch (err) {
+      setMessage({ tone: "err", text: err instanceof ApiError ? err.message : "Could not save your answer." });
+    }
+    setWorking(null);
+    orders.reload();
+    cases.reload();
+    refreshMe?.();
+    window.dispatchEvent(new Event(CHANGED));
+  }
+
   async function decline(c: CaseRow) {
     setWorking(c.id);
     try {
@@ -138,8 +156,8 @@ export function Orders({ refreshMe, me }: { refreshMe?: () => void; me?: Me }) {
           label="Orders"
           title={<>Orders and<br />problems.</>}
           sub={auto
-            ? "Everything your shopper has bought. If a price drops, your shopper refunds you automatically. If a shop's record shows something different from what you ordered, your shopper asks you what arrived."
-            : "Everything your shopper has bought. If a price drops or the wrong item arrives, your shopper builds the case and you press the button for the refund."}
+            ? "Everything your shopper has bought. If a price drops, your shopper refunds you automatically. When an order is delivered, you confirm it arrived as ordered."
+            : "Everything your shopper has bought. If a price drops or a delivery has a problem, your shopper builds the case and you press the button for the refund."}
           panel={
             <div className="panel">
               <span className="tag">Your orders</span>
@@ -164,7 +182,7 @@ export function Orders({ refreshMe, me }: { refreshMe?: () => void; me?: Me }) {
               <h2 className="h2">Problems and refunds</h2>
               <p className="s" style={{ margin: "6px 0 0" }}>
                 {auto
-                  ? "Price drops are refunded for you. If a shop's record shows something different from what you ordered, you are asked what arrived and refunded once you say so. Either way the amount is worked out at that moment, so you cannot be refunded more than you are owed."
+                  ? "Price drops are refunded for you. If you report a problem with a delivery and the shop's own record agrees, you are refunded too. The amount is worked out at that moment, so you cannot be refunded more than you are owed."
                   : "Nothing is refunded until you press the button. The amount is worked out again at that moment, so you cannot be refunded more than you are owed."}
               </p>
               <div style={{ marginTop: 8 }}>
@@ -203,7 +221,7 @@ export function Orders({ refreshMe, me }: { refreshMe?: () => void; me?: Me }) {
                               {working === `draft-${c.id}` ? <Busy>Writing…</Busy> : drafts[c.id] ?? c.draft ? "Write it again" : "Write the message"}
                             </button>
                           )}
-                          {isOpen && c.kind !== "dispute" && <button className="btn2 sm" disabled={working !== null} onClick={() => decline(c)}>{c.kind === "wrong_item" ? "No, it is what I ordered" : "Not now"}</button>}
+                          {isOpen && c.kind !== "dispute" && <button className="btn2 sm" disabled={working !== null} onClick={() => decline(c)}>Not now</button>}
                         </div>
                       </div>
                     </div>
@@ -232,7 +250,16 @@ export function Orders({ refreshMe, me }: { refreshMe?: () => void; me?: Me }) {
                     </div>
                     <Pill tone={st.tone}>{st.text}</Pill>
                     {o.refundedCents > 0 && <Pill tone="ok">Refunded {money(o.refundedCents)}</Pill>}
-                    {o.shopStatus && <span className="s">Shop: {o.shopStatus}{o.promisedBy ? `, promised by ${o.promisedBy}` : ""}</span>}
+                    {o.shopStatus && <span className="s">Shop: {o.shopStatus}{o.promisedBy && o.shopStatus !== "delivered" ? `, promised by ${o.promisedBy}` : ""}</span>}
+                    {o.shopStatus === "delivered" && o.deliveryAnswer === null && (
+                      <div className="row" style={{ flexBasis: "100%", alignItems: "center" }}>
+                        <span className="t">Please confirm it arrived as ordered.</span>
+                        <button className="btn sm" disabled={working !== null} onClick={() => confirmDelivery(o, true)}>{working === `delivery-${o.id}` ? <Busy>Saving…</Busy> : "Yes, it arrived as ordered"}</button>
+                        <button className="btn2 sm" disabled={working !== null} onClick={() => confirmDelivery(o, false)}>No, there is a problem</button>
+                      </div>
+                    )}
+                    {o.deliveryAnswer === "arrived" && <span className="s">You confirmed it arrived as ordered.</span>}
+                    {o.deliveryAnswer === "problem" && <span className="s">You reported a problem with the delivery.</span>}
                   </div>
                 );
               })}

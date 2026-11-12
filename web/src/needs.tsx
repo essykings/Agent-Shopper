@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { CaseRow, Me, Notice, RequestRow } from "./api";
+import type { CaseRow, Me, Notice, OrderRow, RequestRow } from "./api";
 import { badgeCount, needsYou, visibleNeeds } from "../../src/shared/needs.ts";
 import type { NeedItem, NeedsInput } from "../../src/shared/needs.ts";
 
@@ -41,21 +41,24 @@ export function useNeeds(me: Me | null): { items: NeedItem[]; badge: number; unr
   const [requests, setRequests] = useState<RequestRow[]>([]);
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [notices, setNotices] = useState<{ items: Notice[]; unread: number }>({ items: [], unread: 0 });
+  const [orders, setOrders] = useState<OrderRow[]>([]);
   const latest = useRef<RequestRow[]>([]);
   const signedIn = me !== null;
 
   const reload = useCallback(async () => {
     try {
-      const [r, c, n] = await Promise.all([
+      const [r, c, n, o] = await Promise.all([
         api<{ requests: RequestRow[] }>("GET", "/api/requests"),
         api<{ cases: CaseRow[] }>("GET", "/api/cases"),
         api<{ items: Notice[]; unread: number }>("GET", "/api/notifications"),
+        api<{ orders: OrderRow[] }>("GET", "/api/orders"),
       ]);
       latest.current = r.requests;
       if (held) return; // looked at, but shown only once the map has finished
       setRequests(r.requests);
       setCases(c.cases);
       setNotices(n);
+      setOrders(o.orders);
     } catch {
       // Keep what is shown. The next check tries again.
     }
@@ -107,6 +110,7 @@ export function useNeeds(me: Me | null): { items: NeedItem[]; badge: number; unr
     paymentSource: me?.payment.source ?? "demo",
     requests: toRequests(requests),
     cases: cases.map((c) => ({ id: c.id, orderId: c.orderId, kind: c.kind, status: c.status, amountCents: c.amountCents, itemName: c.itemName, shopName: c.shopName, failure: c.failure })),
+    deliveries: orders.filter((o) => o.shopStatus === "delivered" && o.deliveryAnswer === null).map((o) => ({ orderId: o.id, itemName: o.itemName ?? "order", shopName: o.shopName })),
     notices: notices.items.filter((n) => !n.read).map((n) => ({ id: n.id, kind: n.kind, text: n.text })),
     autoRefund: me?.autoRefund ?? false,
   });

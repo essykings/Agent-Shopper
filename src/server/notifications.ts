@@ -3,7 +3,7 @@
 
 import type { Pool } from "./db.ts";
 
-export type NoticeKind = "bought" | "refunded" | "refund_failed" | "not_found" | "question";
+export type NoticeKind = "bought" | "refunded" | "refund_failed" | "not_found" | "confirm_delivery";
 
 export interface Notice {
   id: string;

@@ -12,7 +12,7 @@ const EXAMPLES = ["Wireless earbuds", "Bluetooth speaker", "Webcam", "Power bank
 const DEFAULT_LIMIT = "150";
 
 // A request is two things: what to buy, and the most to pay. The rest (deadline, shop score, never-buy list)
-// has sensible defaults on the server, and the shopper starts as soon as the request is saved.
+// has sensible defaults on the server (nothing is banned unless a request says so), and the shopper starts as soon as the request is saved.
 /** A request to start filled in: for "raise my limit and search again" or "try again". */
 export interface NewPrefill {
   item: string;

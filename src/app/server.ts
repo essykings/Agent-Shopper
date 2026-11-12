@@ -72,6 +72,16 @@ const autoRefund = env["AUTO_REFUND"]?.trim() !== "0";
 const demoEventSeconds = Number(env["DEMO_EVENT_SECONDS"] ?? 60);
 if (!Number.isFinite(demoEventSeconds) || demoEventSeconds < 0) fail("DEMO_EVENT_SECONDS must be a number of seconds, 0 or more.");
 
+// How long orders take. A real shop ships the same day and delivers in one to two days, so that is the default. These settings exist
+// so a test can shorten it (for example DELIVER_MIN_HOURS=0.01 DELIVER_MAX_HOURS=0.02).
+const hours = (name: string, fallback: number): number => {
+  const v = Number(env[name] ?? fallback);
+  if (!Number.isFinite(v) || v < 0) return fail(`${name} must be a number of hours, 0 or more.`);
+  return v;
+};
+const delivery = { shipAfterMs: hours("SHIP_AFTER_HOURS", 6) * 3_600_000, deliverMinMs: hours("DELIVER_MIN_HOURS", 24) * 3_600_000, deliverMaxMs: hours("DELIVER_MAX_HOURS", 48) * 3_600_000 };
+if (delivery.deliverMaxMs < delivery.deliverMinMs) fail("DELIVER_MAX_HOURS must not be less than DELIVER_MIN_HOURS.");
+
 const appDeps: AppDeps = {
   buy: {
     paypal: mock ? new FakePayPal() : createPayPalClient({ clientId: need("PAYPAL_CLIENT_ID"), clientSecret: need("PAYPAL_CLIENT_SECRET"), ...(env["PAYPAL_WEBHOOK_ID"]?.trim() ? { webhookId: env["PAYPAL_WEBHOOK_ID"].trim() } : {}) }),
@@ -115,14 +125,15 @@ if (existsSync("./web/dist/index.html")) {
 serve({ fetch: app.fetch, port });
 console.log(`Agent Shopper is open at http://localhost:${port}${mock ? "  (MOCK MODE: scripted shopper, pretend PayPal)" : ""}`);
 
-// Every 30 seconds: scripted demo events that are due, then every recent paid order is checked and, if a refund is owed, refunded.
+// Every 30 seconds: scripted demo events that are due, orders shipped and delivered when their time has come (the owner is then asked
+// to confirm the delivery), and every recent paid order checked and, if a refund is owed, refunded.
 // It runs on the server, so it happens even when nobody has the app open. One pass at a time.
-if (autoRefund || demoEventSeconds > 0) {
+{
   let sweeping = false;
   setInterval(() => {
     if (sweeping) return;
     sweeping = true;
-    void runAftercareSweep(pool, { paypal: appDeps.buy.paypal, fetchPage: appDeps.buy.fetchPage, shops }, { demoEventSeconds }, autoRefund)
+    void runAftercareSweep(pool, { paypal: appDeps.buy.paypal, fetchPage: appDeps.buy.fetchPage, shops }, { demoEventSeconds, delivery }, autoRefund)
       .catch((err) => console.error(`Aftercare pass failed: ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => {
         sweeping = false;

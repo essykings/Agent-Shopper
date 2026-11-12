@@ -31,7 +31,7 @@ function mockDraft(params: Params): string {
   const o = e.evidence?.order ?? {};
   const paid = typeof o.paidCents === "number" ? `$${(o.paidCents / 100).toFixed(2)}` : "the amount paid";
   const ask = e.askingFor ?? "a refund";
-  const why = e.kind === "wrong_item" ? `The shop's delivery record says it sent "${e.evidence?.arrived?.description ?? "a different item"}" instead of what was listed.` : e.summary ?? "There is a problem with this order.";
+  const why = e.kind === "wrong_item" ? `The shop's delivery record lists "${e.evidence?.arrived?.description ?? "a different item"}" for this order, which is not what I ordered.` : e.summary ?? "There is a problem with this order.";
   return `Hello ${o.shop ?? "team"}, I ordered "${o.item ?? "an item"}" and paid ${paid}. ${why} Your policy says: ${String(e.evidence?.shopPolicy?.returns ?? "see your returns page").replace(/\.$/, "")}. I am asking for ${ask}. The saved listing page, the order record and the payment timeline are attached. Thank you.`;
 }
 

@@ -20,6 +20,7 @@ import { checkOrders, declineCase, draftMessage, listCases, loadCase, refundCase
 import type { AftercareDeps } from "../server/aftercare.ts";
 import { refundOpenCases } from "../server/aftercare-auto.ts";
 import { giveUpBody } from "../shared/messages.ts";
+import { DeliveryError, answerDelivery } from "../server/delivery.ts";
 import { listNotices, markAllRead, notify } from "../server/notifications.ts";
 import { handleWebhook } from "../server/webhooks.ts";
 import { costMicroUsd, worstCaseMicroUsd } from "../agent/pricing.ts";
@@ -38,7 +39,6 @@ import { SESSION_SECONDS, signSession, verifySession } from "./session.ts";
 
 /** What a request gets when it does not say. */
 const DEFAULT_MIN_SCORE = 70;
-const DEFAULT_NEVER_BUY = ["gift cards", "crypto", "alcohol"];
 /** The most one request may be: the most an allowance can be set to. What really limits a request is the allowance that is free. */
 const MAX_REQUEST_CENTS = 100_000;
 
@@ -414,7 +414,8 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     if (Number.isNaN(when) || when < now().getTime() - 86_400_000 || when > now().getTime() + 400 * 86_400_000) {
       throw new HttpError(400, "The deadline must be a date within the next year.");
     }
-    const rawBanned = b["neverBuy"] === undefined ? DEFAULT_NEVER_BUY : Array.isArray(b["neverBuy"]) ? b["neverBuy"] : [];
+    // Nothing is banned unless a request says so: the app has no built-in list of things it will not buy.
+    const rawBanned = Array.isArray(b["neverBuy"]) ? b["neverBuy"] : [];
     if (rawBanned.length > 10) throw new HttpError(400, "Ban at most 10 categories.");
     const neverBuy = rawBanned.map((x) => str(x, "A banned category", 1, 30).toLowerCase());
 
@@ -685,7 +686,7 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
   app.get("/api/orders", needUser, async (c) => {
     const res = await pool.query(
       `select o.id, o.status, o.total_cents, o.refunded_cents, o.shop_id, s.name as shop_name, o.created_at, o.failure,
-              so.item_key, so.status as shop_status, to_char(so.promised_by, 'YYYY-MM-DD') as promised_by
+              so.item_key, so.status as shop_status, to_char(so.promised_by, 'YYYY-MM-DD') as promised_by, o.delivery_answer
        from orders o join shops s on s.id = o.shop_id left join shop_orders so on so.order_id = o.id
        where o.user_id = $1 order by o.created_at desc limit 50`,
       [c.get("userId")],
@@ -693,10 +694,23 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     return c.json({
       orders: res.rows.map((r) => ({
         id: r.id, status: r.status, totalCents: r.total_cents, shopId: r.shop_id, shopName: r.shop_name, createdAt: r.created_at,
-        failure: r.failure, itemKey: r.item_key, shopStatus: r.shop_status, promisedBy: r.promised_by, refundedCents: r.refunded_cents,
+        failure: r.failure, itemKey: r.item_key, shopStatus: r.shop_status, promisedBy: r.promised_by, refundedCents: r.refunded_cents, deliveryAnswer: r.delivery_answer,
         itemName: (() => { const shop = SHOPS.find((s) => s.id === r.shop_id); return shop?.products.find((p) => p.key === r.item_key)?.name ?? r.item_key; })(),
       })),
     });
+  });
+
+  // Once an order is delivered the owner confirms it arrived as ordered, or reports a problem. A reported problem is refunded only
+  // when the shop's own delivery record also shows something other than what was ordered.
+  app.post("/api/orders/:id/delivery", needUser, async (c) => {
+    const b = await body(c);
+    if (typeof b["arrived"] !== "boolean") throw new HttpError(400, "arrived must be true or false.");
+    try {
+      return c.json(await answerDelivery(pool, aftercare(), { userId: c.get("userId"), orderId: idOf(c), arrived: b["arrived"] }));
+    } catch (err) {
+      if (err instanceof DeliveryError) throw new HttpError(err.status === 404 ? 404 : 409, err.message);
+      throw err;
+    }
   });
 
   app.notFound((c) => c.json({ error: "Not found." }, 404));

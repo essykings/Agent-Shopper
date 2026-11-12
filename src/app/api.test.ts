@@ -15,7 +15,7 @@ import type { Limits } from "../server/limits.ts";
 import { SHOPS, findShop } from "../shops/catalog.ts";
 import { createShopsApp, shopAddress } from "../shops/mount.ts";
 import { createShopApp } from "../shops/shop-app.ts";
-import { seedShops, setPriceAdjust, shipOrder } from "../shops/service.ts";
+import { deliverOrder, seedShops, setPriceAdjust, shipOrder } from "../shops/service.ts";
 import { createMandate } from "../server/mandates.ts";
 import { createApi } from "./api.ts";
 import { Hub } from "./hub.ts";
@@ -25,6 +25,7 @@ import { createMockModel } from "./mock.ts";
 import { giveUpBody } from "../shared/messages.ts";
 import { refundOpenCases, runAftercareSweep } from "../server/aftercare-auto.ts";
 import { applyDemoEvents } from "../server/demo-events.ts";
+import type { DeliveryTimes } from "../shops/service.ts";
 import { signSession, verifySession } from "./session.ts";
 
 const NOW = new Date("2026-11-11T12:00:00Z");
@@ -288,7 +289,7 @@ test("a request needs only what to buy and how much; everything else has a defau
   assert.equal(row.askAboveCents, 10000, "the price is the only limit, so there is nothing separate to ask above");
   assert.equal(row.sellerMinScore, 70);
   assert.equal(row.condition, "new");
-  assert.deepEqual(row.neverBuy, ["gift cards", "crypto", "alcohol"]);
+  assert.deepEqual(row.neverBuy, [], "nothing is banned by default: the app has no built-in list");
   const days = (Date.parse(`${row.deadline}T00:00:00Z`) - Date.now()) / 86_400_000;
   assert.ok(days > 28 && days < 31, `deadline is about 30 days away, got ${days}`);
   const run = await b.post(`/api/requests/${made.json.id}/run`);
@@ -985,38 +986,71 @@ test("the price protection window is the shop's own, and a shop without it owes 
   assert.deepEqual((await old.b.post("/api/aftercare/check")).json.cases, [], "an order outside the window never opens a case");
 });
 
-test("a wrong item opens a case for the whole price, with what arrived as evidence", { skip }, async () => {
+const answer = (b: ReturnType<typeof browser>, orderId: string, arrived: boolean) => b.post(`/api/orders/${orderId}/delivery`, { arrived });
+
+test("a reported delivery problem is refunded in full only when the shop's own record backs it up", { skip }, async () => {
   const { b, fake, orderId, captureId } = await boughtEarbuds();
-  assert.deepEqual((await b.post("/api/aftercare/check")).json.cases, [], "nothing shipped yet");
-  await shipOrder(pool, orderId, false);
-  assert.deepEqual((await b.post("/api/aftercare/check")).json.cases, [], "shipped as listed");
+  // Not delivered yet: there is nothing to confirm, and no problem can be reported.
+  assert.equal((await answer(b, orderId, false)).status, 409);
   await shipOrder(pool, orderId, true);
-  const c = (await b.post("/api/aftercare/check")).json.cases[0];
-  assert.deepEqual([c.kind, c.status, c.amountCents], ["wrong_item", "open", 4500]);
+  assert.equal((await answer(b, orderId, false)).status, 409, "shipped is not delivered");
+  await deliverOrder(pool, orderId);
+  // Delivered, but nobody has said anything: checking for problems opens nothing, whatever the shop's record says.
+  assert.deepEqual((await b.post("/api/aftercare/check")).json.cases, []);
+
+  const r = await answer(b, orderId, false);
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.json.answer, r.json.refund.status, r.json.refund.amountCents], ["problem", "refunded", 4500]);
+  assert.equal(r.json.message, "Thank you. You were refunded $45.00.");
+  const c = (await b.get("/api/cases")).json.cases[0];
+  assert.deepEqual([c.kind, c.status, c.amountCents], ["wrong_item", "refunded", 4500]);
   assert.match(c.summary, /The shop's delivery record shows "A different, cheaper item than the one ordered" for your order of "Wireless earbuds"/);
   assert.equal(c.evidence.arrived.description, "A different, cheaper item than the one ordered");
   assert.equal(c.evidence.listing.condition, "Brand new, factory sealed.");
   assert.match(c.evidence.shopPolicy.returns, /30-day returns/);
-  const r = await b.post(`/api/cases/${c.id}/refund`);
-  assert.deepEqual([r.json.result.status, r.json.result.amountCents], ["refunded", 4500]);
   assert.deepEqual(refundCalls(fake).map((x) => [x.captureId, x.amountCents]), [[captureId, 4500]]);
-  assert.equal((await b.get("/api/me")).json.balances.monthSpentCents, 0);
   assert.match(refundCalls(fake)[0]!.note, /Refund: the item did not match the order/);
+  assert.equal((await b.get("/api/me")).json.balances.monthSpentCents, 0);
+  assert.equal((await b.get("/api/orders")).json.orders[0].deliveryAnswer, "problem");
+  const told = ((await b.get("/api/notifications")).json.items as any[]).find((n) => n.kind === "refunded");
+  assert.match(told.text, /^You reported a problem with your Wireless earbuds from Northgear, so you were refunded \$45\.00\.$/);
+  assert.equal((await answer(b, orderId, false)).status, 409, "an answer can be given once");
+  assert.equal(refundCalls(fake).length, 1);
+
+  // The shop's record shows exactly what was ordered: a report is saved, and nothing is refunded.
+  const clean = await boughtEarbuds(harness(), "198.51.100.54");
+  await shipOrder(pool, clean.orderId, false);
+  await deliverOrder(pool, clean.orderId);
+  const no = await answer(clean.b, clean.orderId, false);
+  assert.deepEqual([no.json.answer, no.json.refund], ["problem", null]);
+  assert.match(no.json.message, /saved your report.*nothing was refunded/i);
+  assert.deepEqual((await clean.b.get("/api/cases")).json.cases, []);
+  assert.deepEqual(refundCalls(clean.fake), []);
+
+  // "It arrived as ordered" refunds nothing, even when the shop's record shows a mix-up.
+  const fine = await boughtEarbuds(harness(), "198.51.100.55");
+  await shipOrder(pool, fine.orderId, true);
+  await deliverOrder(pool, fine.orderId);
+  const yes = await answer(fine.b, fine.orderId, true);
+  assert.deepEqual([yes.json.answer, yes.json.refund], ["arrived", null]);
+  assert.deepEqual((await fine.b.post("/api/aftercare/check")).json.cases, [], "and no problem case ever opens for it");
+  assert.deepEqual(refundCalls(fine.fake), []);
+
+  // It is the owner's own order to answer for, and the answer must be yes or no.
+  assert.equal((await fine.b.post(`/api/orders/${orderId}/delivery`, { arrived: true })).status, 404, "not someone else's order");
+  assert.equal((await fine.b.post(`/api/orders/${fine.orderId}/delivery`, { arrived: "yes" })).status, 400);
 });
 
 test("two problems on one order can never refund more than was paid, and the database refuses it too", { skip }, async () => {
   const { b, fake, orderId } = await boughtEarbuds();
   await setPriceAdjust(pool, "northgear", -15);
   await shipOrder(pool, orderId, true);
-  const cases = (await b.post("/api/aftercare/check")).json.cases;
-  assert.deepEqual(cases.map((c: any) => c.kind).sort(), ["price_drop", "wrong_item"]);
-  const drop = cases.find((c: any) => c.kind === "price_drop");
-  const wrong = cases.find((c: any) => c.kind === "wrong_item");
-  assert.equal((await b.post(`/api/cases/${drop.id}/refund`)).json.result.amountCents, 600);
-  const trimmed = (await b.get("/api/cases")).json.cases.find((c: any) => c.id === wrong.id);
-  assert.deepEqual([trimmed.status, trimmed.amountCents], ["open", 3900], "the other claim is cut to what is left, so no screen offers more than can be refunded");
-  const rest = await b.post(`/api/cases/${wrong.id}/refund`);
-  assert.deepEqual([rest.json.result.status, rest.json.result.amountCents], ["refunded", 3900], "only what is left");
+  await deliverOrder(pool, orderId);
+  const found = (await b.post("/api/aftercare/check")).json.cases;
+  assert.deepEqual(found.map((c: any) => c.kind), ["price_drop"], "the delivery problem is only a case once the owner reports it");
+  assert.equal((await b.post(`/api/cases/${found[0].id}/refund`)).json.result.amountCents, 600);
+  const reported = await answer(b, orderId, false);
+  assert.deepEqual([reported.json.refund.status, reported.json.refund.amountCents], ["refunded", 3900], "only what is left");
   assert.equal(refundCalls(fake).reduce((n, x) => n + x.amountCents, 0), 4500);
   assert.equal((await b.get("/api/orders")).json.orders[0].refundedCents, 4500);
   assert.equal((await ledgerOf(b, "refund_received")).reduce((n: number, e: any) => n + e.amountCents, 0), 4500);
@@ -1028,10 +1062,9 @@ test("two problems on one order can never refund more than was paid, and the dat
   const two = await boughtEarbuds(harness(), "198.51.100.53");
   await setPriceAdjust(pool, "northgear", -15);
   await shipOrder(pool, two.orderId, true);
-  const both = (await two.b.post("/api/aftercare/check")).json.cases;
-  assert.equal(both.length, 2);
-  await two.b.post(`/api/cases/${both.find((c: any) => c.kind === "wrong_item").id}/refund`);
-  const dropCase = both.find((c: any) => c.kind === "price_drop");
+  await deliverOrder(pool, two.orderId);
+  const dropCase = (await two.b.post("/api/aftercare/check")).json.cases.find((c: any) => c.kind === "price_drop");
+  assert.equal((await answer(two.b, two.orderId, false)).json.refund.amountCents, 4500);
   const afterWrong = (await two.b.get("/api/cases")).json.cases.find((c: any) => c.id === dropCase.id);
   assert.deepEqual([afterWrong.status, afterWrong.failure], ["expired", "Nothing is left to refund on this order."], "the other claim closes as soon as nothing is left");
   assert.equal((await two.b.post(`/api/cases/${dropCase.id}/refund`)).status, 409);
@@ -1416,7 +1449,17 @@ test("the status endpoint gives a signed-in person their own count, and nobody e
 // ---------- automatic aftercare: scripted shop events, automatic refunds, notifications ----------
 
 const sweepDeps = (h: ReturnType<typeof harness>) => ({ paypal: h.fake, fetchPage: h.deps.buy.fetchPage, shops: h.deps.shops });
-const age = (minutes: number) => pool.query("update orders set created_at = now() - make_interval(mins => $1) where created_at > now() - interval '1 day'", [minutes]);
+const age = async (minutes: number) => {
+  // Moves recent orders back in time, keeping their order (one second apart), so "the first" and "the second" stay what they were.
+  await pool.query(
+    `update orders o set created_at = now() - make_interval(mins => $1) + (r.n * interval '1 second')
+     from (select id, row_number() over (order by created_at, id) as n from orders where created_at > now() - interval '3 days') r where o.id = r.id`,
+    [minutes],
+  );
+  await pool.query(
+    `update shop_orders so set created_at = o.created_at from orders o where o.id = so.order_id and o.created_at > now() - interval '3 days'`,
+  );
+};
 /** The aftercare pass looks at everyone's recent orders, so each of these tests first sets earlier tests' orders aside. */
 const clean = async () => {
   await pool.query("update shop_orders set demo_event = 'none' where demo_event is null");
@@ -1468,7 +1511,9 @@ test("a demo purchase gets its scripted price drop a minute later and is refunde
   assert.equal((await b.get("/api/notifications")).json.unread, 0);
 });
 
-test("the second demo purchase gets the wrong item and the owner is asked, not refunded; the answer decides; later orders get nothing", { skip }, async () => {
+const SAME_DAY: DeliveryTimes = { shipAfterMs: 0, deliverMinMs: 0, deliverMaxMs: 0 };
+
+test("once delivered, every order asks the same neutral question; a report is refunded only when the shop's record backs it up, and the demo stages no mix-up", { skip }, async () => {
   await clean();
   const h = harness({ autoRefund: true, demoEventSeconds: 60 });
   const { b } = await signedIn(h);
@@ -1476,49 +1521,56 @@ test("the second demo purchase gets the wrong item and the owner is asked, not r
   await buyBottle(b, "First aid kit");
   await buyBottle(b, "Wool hat");
   await age(2);
-  // Only the price drop is refunded by itself.
-  assert.deepEqual(await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 }), { events: 2, refunds: 1 });
-  const cases = (await b.get("/api/cases")).json.cases as any[];
-  assert.equal(cases.length, 2, "the third order got no event");
-  const wrong = cases.find((c) => c.kind === "wrong_item");
-  assert.equal(wrong.status, "open", "a wrong item waits for the owner to say what arrived");
-  assert.equal(cases.find((c) => c.kind === "price_drop").status, "refunded");
-  const second = (await b.get("/api/orders")).json.orders.find((o: any) => o.id === wrong.orderId);
-  assert.equal(wrong.amountCents, second.totalCents, "the whole amount paid for that order");
+  // Orders ship and arrive on their own in time; here that time has come. Only the first order's price drop is staged, and refunded by itself.
+  assert.deepEqual(await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60, delivery: SAME_DAY }), { events: 1, refunds: 1 });
+  const orders = (await b.get("/api/orders")).json.orders as any[];
+  assert.deepEqual(orders.map((o) => o.shopStatus), ["delivered", "delivered", "delivered"]);
+  const ids = orders.map((o) => o.id);
+  const boxes = await pool.query("select shipped_item is not null as wrong from shop_orders where order_id = any($1)", [ids]);
+  assert.ok(boxes.rows.every((r) => r.wrong === false), "every order shipped as listed: nothing is staged");
+  assert.deepEqual(((await b.get("/api/cases")).json.cases as any[]).map((c) => [c.kind, c.status]), [["price_drop", "refunded"]]);
 
-  // They are asked, once, with what the shop's record says.
-  const asked = (await b.get("/api/notifications")).json.items.filter((n: any) => n.kind === "question");
-  assert.equal(asked.length, 1);
-  assert.match(asked[0].text, new RegExp(`^Please check your ${second.itemName} from ${second.shopName}: the shop's delivery record lists ".+" instead\\. Did you receive something different\\? If so, you can be refunded \\$${(second.totalCents / 100).toFixed(2).replace(".", "\\.")}\\.$`));
-  assert.doesNotMatch(asked[0].text, /wrong item|sent the/i, "the shop is not accused of anything");
-  // However many times the pass runs, and however long it waits, the app never refunds a wrong item on its own.
-  for (let i = 0; i < 4; i++) {
-    await pool.query("update cases set auto_attempt_at = now() - interval '1 hour'");
-    await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 });
-    await b.post("/api/aftercare/check");
-  }
-  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1, "only the price drop was refunded");
-  assert.equal((await b.get("/api/notifications")).json.items.filter((n: any) => n.kind === "question").length, 1, "and the question was not asked again");
+  // Each delivered order asks the same plain question, once, and says nothing about the shop's record.
+  const asked = ((await b.get("/api/notifications")).json.items as any[]).filter((n) => n.kind === "confirm_delivery");
+  assert.equal(asked.length, 3);
+  for (const o of orders) assert.ok(asked.some((n) => n.text === `Your ${o.itemName} from ${o.shopName} was delivered. Please confirm it arrived as ordered.`), o.itemName);
+  assert.ok(asked.every((n) => !/wrong|sent|record|different|check your/i.test(n.text)), "no hint of a mix-up");
+  await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60, delivery: SAME_DAY });
+  assert.equal(((await b.get("/api/notifications")).json.items as any[]).filter((n) => n.kind === "confirm_delivery").length, 3, "not told again by the next pass");
 
-  // "Yes, I received something different" refunds the whole amount; the same press again does nothing more.
-  const yes = await b.post(`/api/cases/${wrong.id}/refund`);
-  assert.deepEqual([yes.json.result.status, yes.json.result.amountCents], ["refunded", second.totalCents]);
-  assert.equal((await b.post(`/api/cases/${wrong.id}/refund`)).status, 409);
-  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 2);
+  // The owner answers. Nothing was shipped wrongly, so reporting a problem saves the report and refunds nothing.
+  const refundsBefore = h.fake.calls.filter((c) => c.method === "refund").length;
+  const problem = await answer(b, ids[0]!, false);
+  assert.deepEqual([problem.json.answer, problem.json.refund], ["problem", null]);
+  assert.equal((await answer(b, ids[1]!, true)).json.answer, "arrived");
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, refundsBefore, "no refund: the shop's record shows what was ordered");
+  assert.deepEqual(((await b.get("/api/orders")).json.orders as any[]).map((o) => o.deliveryAnswer).sort(), ["arrived", null, "problem"]);
 });
 
-test("'No, it is fine' closes a wrong-item question without refunding anything", { skip }, async () => {
+test("orders ship after a few hours and arrive one to two days after they were placed, the same for the same order, and ship as listed", { skip }, async () => {
   await clean();
-  const h = harness({ autoRefund: true, demoEventSeconds: 60 });
+  const h = harness({ demoEventSeconds: 60 });
   const { b } = await signedIn(h);
-  await buyBottle(b, "Water bottle");
+  await buyBottle(b, "Wool hat");
   await buyBottle(b, "First aid kit");
+  const status = async () => ((await b.get("/api/orders")).json.orders as any[]).map((o) => o.shopStatus).reverse();
+  const sweep = () => runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 });
   await age(2);
-  await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 });
-  const wrong = ((await b.get("/api/cases")).json.cases as any[]).find((c) => c.kind === "wrong_item");
-  assert.equal((await b.post(`/api/cases/${wrong.id}/decline`)).status, 200);
-  assert.equal(((await b.get("/api/cases")).json.cases as any[]).find((c) => c.id === wrong.id).status, "declined");
-  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1, "only the price drop");
+  await sweep();
+  assert.deepEqual(await status(), ["received", "received"], "two minutes after buying, nothing has shipped");
+  await age(7 * 60);
+  await sweep();
+  assert.deepEqual(await status(), ["shipped", "shipped"], "seven hours after buying, shipped");
+  const ids = ((await b.get("/api/orders")).json.orders as any[]).map((o) => o.id);
+  const shipped = await pool.query("select shipped_item is not null as wrong from shop_orders where order_id = any($1)", [ids]);
+  assert.deepEqual(shipped.rows.map((r) => r.wrong), [false, false], "both shipped as listed");
+  await age(23 * 60);
+  await sweep();
+  assert.deepEqual(await status(), ["shipped", "shipped"], "23 hours after buying, not yet");
+  await age(49 * 60);
+  await sweep();
+  assert.deepEqual(await status(), ["delivered", "delivered"], "49 hours after buying, delivered");
+  assert.equal(((await b.get("/api/notifications")).json.items as any[]).filter((n) => n.kind === "confirm_delivery").length, 2);
 });
 
 test("scripted events are only for demo accounts, and only when switched on", { skip }, async () => {

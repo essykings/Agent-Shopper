@@ -46,7 +46,7 @@ export interface Me {
 }
 export interface Notice {
   id: string;
-  kind: "bought" | "refunded" | "refund_failed" | "not_found" | "question";
+  kind: "bought" | "refunded" | "refund_failed" | "not_found" | "confirm_delivery";
   text: string;
   href: string | null;
   createdAt: string;
@@ -119,6 +119,8 @@ export interface OrderRow {
   refundedCents: number;
   shopStatus: "received" | "shipped" | "delivered" | null;
   promisedBy: string | null;
+  /** What the owner said when asked to confirm delivery: "arrived", "problem", or null if not yet answered. */
+  deliveryAnswer: "arrived" | "problem" | null;
 }
 
 /** A problem found with an order, with the evidence for it. */

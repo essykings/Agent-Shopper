@@ -226,17 +226,30 @@ async function fullFlow(): Promise<void> {
   try {
     const drop = await call("POST", controlUrl, "/price", { form: { token: controlToken, shopId: "northgear", pct: "-15" }, timeoutMs: 120_000 });
     const wrong = await call("POST", controlUrl, "/ship-wrong", { form: { token: controlToken, orderId } });
-    check(drop.status === 303 && wrong.status === 303, "The control panel works", `price ${drop.status}, ship wrong item ${wrong.status}. (303 means done.)`);
+    const delivered = await call("POST", controlUrl, "/deliver", { form: { token: controlToken, orderId } });
+    check(drop.status === 303 && wrong.status === 303 && delivered.status === 303, "The control panel works", `price ${drop.status}, ship with the wrong item ${wrong.status}, deliver ${delivered.status}. (303 means done.)`);
+    // The price drop. With automatic refunds on, checking refunds the difference at once; otherwise it waits for the button.
+    const auto = (await call("GET", appUrl, "/api/me", { cookie })).json?.autoRefund === true;
     const found = await call("POST", appUrl, "/api/aftercare/check", { cookie, body: {}, timeoutMs: 60_000 });
-    const kinds = (found.json?.cases ?? []).map((c: any) => `${c.kind}:${c.status}:${c.amountCents}`).sort();
-    check(kinds.join(",") === "price_drop:open:600,wrong_item:open:4500", "Both problems are found, with the right amounts", kinds.join(", "));
     const dropCase = (found.json?.cases ?? []).find((c: any) => c.kind === "price_drop");
-    if (dropCase) {
+    check(Boolean(dropCase) && dropCase.amountCents === 600, "The price drop is found, with the right amount", JSON.stringify(dropCase && [dropCase.status, dropCase.amountCents]));
+    if (dropCase && auto) {
+      check(dropCase.status === "refunded", "A price drop is refunded automatically", dropCase.status);
+    } else if (dropCase) {
       const refund = await call("POST", appUrl, `/api/cases/${dropCase.id}/refund`, { cookie, body: {} });
       check(refund.json?.result?.status === "refunded" && refund.json.result.amountCents === 600, "The refund is made for exactly the difference", JSON.stringify(refund.json?.result));
+    }
+    if (dropCase) {
       const again = await call("POST", appUrl, `/api/cases/${dropCase.id}/refund`, { cookie, body: {} });
       check(again.status === 409, "Pressing again refunds nothing more", `HTTP ${again.status}`);
     }
+    // The delivery: nothing is refunded until the owner reports a problem, and then only what is left.
+    const before = (await call("GET", appUrl, "/api/cases", { cookie })).json?.cases ?? [];
+    check(!before.some((c: any) => c.kind === "wrong_item"), "A delivery problem is not refunded until the owner reports one", before.map((c: any) => c.kind).join(", "));
+    const reported = await call("POST", appUrl, `/api/orders/${orderId}/delivery`, { cookie, body: { arrived: false } });
+    check(reported.json?.refund?.status === "refunded" && reported.json.refund.amountCents === 3900, "A reported problem is refunded in full when the shop's own record agrees (what was left of $45.00)", JSON.stringify(reported.json?.refund ?? reported.json));
+    const twice = await call("POST", appUrl, `/api/orders/${orderId}/delivery`, { cookie, body: { arrived: false } });
+    check(twice.status === 409, "The delivery can be answered once", `HTTP ${twice.status}`);
   } finally {
     await call("POST", controlUrl, "/price", { form: { token: controlToken, shopId: "northgear", pct: "0" } }).catch(() => undefined);
   }

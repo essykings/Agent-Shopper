@@ -154,6 +154,14 @@ test("denies a never-buy category, ignoring case and spacing", () => {
   assert.deepEqual(failing(r, "deny"), ["category"]);
 });
 
+test("with no never-buy list the checklist has no never-buy line; with a list it does", () => {
+  const none = run({}, {}, { neverBuyCategories: [] });
+  assert.equal(none.decision, "allow");
+  assert.ok(!none.checks.some((c) => c.id === "category"), "nothing to show when nothing is banned");
+  const some = run();
+  assert.ok(some.checks.some((c) => c.id === "category" && c.level === "pass"));
+});
+
 test("deadline: denies after it passes or when delivery is late, asks when delivery is unknown", () => {
   assert.equal(run({}, { now: new Date("2027-03-02T00:00:00Z") }).decision, "deny");
   assert.equal(run({ deliveryBy: "2027-03-05" }).decision, "deny");

@@ -1,8 +1,9 @@
 // Aftercare: what happens once an order is paid. Plain code, like the guard.
 //
 //   find a problem  ->  build the evidence  ->  work out the refund  ->  PayPal refunds  ->  the ledger records it
-//   (a price drop is refunded automatically by aftercare-auto.ts. A wrong item waits for the owner to say it is what arrived,
-//    because only the owner knows. The owner can also press the button if an automatic refund fails.)
+//   (a price drop is refunded automatically by aftercare-auto.ts. A delivery problem is refunded when the owner reports it,
+//    because only the owner knows what arrived, and only if the shop's own record backs it up. The owner can also press the
+//    button if a refund fails.)
 //
 // Rules of the house:
 //  - Code decides whether a refund is owed and how much. A model only writes words for a person
@@ -19,7 +20,6 @@ import { findProduct, findShop } from "../shops/catalog.ts";
 import { money } from "../shops/pages.ts";
 import type { Pool } from "./db.ts";
 import { appendLedger } from "./ledger.ts";
-import { notify } from "./notifications.ts";
 import type { PayPalPort } from "./paypal-port.ts";
 
 /** A price drop smaller than this is not worth a refund. */
@@ -60,11 +60,15 @@ export function planPriceDrop(i: { paidCents: number; currentCents: number | nul
   return { eligible: true, amountCents: amount, reason: `The price fell from ${money(i.paidCents)} to ${money(i.currentCents)}, inside the shop's ${i.windowDays}-day price protection.` };
 }
 
-/** What the shop sent is not what was listed. The whole of what is left is owed. */
-export function planWrongItem(i: { paidCents: number; refundedCents: number; shopStatus: string | null; shippedItem: string | null; listedName: string }): Plan {
+/**
+ * What arrived is not what was ordered. The whole of what is left is owed, but only when all of this is true: the order has been
+ * delivered, the owner said there is a problem (only the owner knows what arrived), and the shop's own delivery record agrees.
+ */
+export function planWrongItem(i: { paidCents: number; refundedCents: number; shopStatus: string | null; shippedItem: string | null; listedName: string; deliveryAnswer: string | null }): Plan {
   const left = i.paidCents - i.refundedCents;
-  if (i.shippedItem === null) return { eligible: false, amountCents: 0, reason: "The shop's delivery record matches what was listed." };
-  if (i.shopStatus !== "shipped" && i.shopStatus !== "delivered") return { eligible: false, amountCents: 0, reason: "The shop has not shipped it yet." };
+  if (i.shopStatus !== "delivered") return { eligible: false, amountCents: 0, reason: "It has not been delivered yet." };
+  if (i.deliveryAnswer !== "problem") return { eligible: false, amountCents: 0, reason: "No problem has been reported with this delivery." };
+  if (i.shippedItem === null) return { eligible: false, amountCents: 0, reason: "The shop's delivery record matches what was ordered." };
   if (left <= 0) return { eligible: false, amountCents: 0, reason: "Nothing is left to refund on this order." };
   return { eligible: true, amountCents: left, reason: `The shop's delivery record shows "${i.shippedItem}" for your order of "${i.listedName}".` };
 }
@@ -88,19 +92,21 @@ export interface OrderFacts {
   promisedBy: string | null;
   /** A price cut the shop gave this order only (percent). */
   priceCutPct: number;
+  /** What the owner said when asked to confirm delivery: "arrived", "problem", or null if not answered. */
+  deliveryAnswer: string | null;
 }
 
 const ORDER_SQL = `
   select o.id, o.user_id, o.mandate_id, o.shop_id, o.proposal_id, o.total_cents, o.refunded_cents, o.status,
          o.paypal_capture_id, o.created_at, so.item_key, so.status as shop_status, so.shipped_item,
-         to_char(so.promised_by, 'YYYY-MM-DD') as promised_by, coalesce(so.price_cut_pct, 0) as price_cut_pct
+         to_char(so.promised_by, 'YYYY-MM-DD') as promised_by, coalesce(so.price_cut_pct, 0) as price_cut_pct, o.delivery_answer
   from orders o left join shop_orders so on so.order_id = o.id`;
 
 function toFacts(r: Record<string, any>): OrderFacts {
   return {
     orderId: r.id, userId: r.user_id, mandateId: r.mandate_id, shopId: r.shop_id, proposalId: r.proposal_id, totalCents: r.total_cents,
     refundedCents: r.refunded_cents, status: r.status, captureId: r.paypal_capture_id, createdAt: r.created_at, itemKey: r.item_key,
-    shopStatus: r.shop_status, shippedItem: r.shipped_item, promisedBy: r.promised_by, priceCutPct: r.price_cut_pct,
+    shopStatus: r.shop_status, shippedItem: r.shipped_item, promisedBy: r.promised_by, priceCutPct: r.price_cut_pct, deliveryAnswer: r.delivery_answer,
   };
 }
 
@@ -196,7 +202,7 @@ async function openOrUpdateCase(pool: Pool, o: OrderFacts, kind: CaseKind, plan:
   const evidence = await buildEvidence(pool, o, { kind, amountCents: plan.amountCents, reason: plan.reason });
   if (plan.eligible) {
     // A new case, or the amount on a case still waiting is brought up to date. A finished case is left alone.
-    const saved = await pool.query<{ id: string; inserted: boolean }>(
+    await pool.query<{ id: string; inserted: boolean }>(
       `insert into cases (user_id, order_id, kind, amount_cents, summary, evidence) values ($1, $2, $3, $4, $5, $6)
        on conflict (order_id, kind) where kind <> 'dispute'
        do update set amount_cents = excluded.amount_cents, summary = excluded.summary, evidence = excluded.evidence, updated_at = now()
@@ -204,17 +210,6 @@ async function openOrUpdateCase(pool: Pool, o: OrderFacts, kind: CaseKind, plan:
        returning id, (xmax = 0) as inserted`,
       [o.userId, o.orderId, kind, plan.amountCents, plan.reason, JSON.stringify(evidence)],
     );
-    // A wrong item is the owner's to confirm: only they know what arrived. So, once, they are asked.
-    const row = saved.rows[0];
-    if (kind === "wrong_item" && row?.inserted && o.shippedItem) {
-      await notify(pool, {
-        userId: o.userId,
-        kind: "question",
-        text: `Please check your ${itemNameOf(o.shopId, o.itemKey)} from ${findShop(o.shopId)?.name ?? "the shop"}: the shop's delivery record lists "${o.shippedItem}" instead. Did you receive something different? If so, you can be refunded ${money(plan.amountCents)}.`,
-        href: "#/orders",
-        key: `case:${row.id}:question`,
-      });
-    }
   } else {
     // The reason has gone (the price went back up): a case still waiting can no longer be acted on.
     await pool.query(
@@ -232,7 +227,7 @@ export async function checkOrders(pool: Pool, deps: AftercareDeps, userId: strin
     if (!PAID.has(o.status)) continue;
     const shop = findShop(o.shopId);
     if (!shop) continue;
-    const wrong = planWrongItem({ paidCents: o.totalCents, refundedCents: o.refundedCents, shopStatus: o.shopStatus, shippedItem: o.shippedItem, listedName: itemNameOf(o.shopId, o.itemKey) });
+    const wrong = planWrongItem({ paidCents: o.totalCents, refundedCents: o.refundedCents, shopStatus: o.shopStatus, shippedItem: o.shippedItem, listedName: itemNameOf(o.shopId, o.itemKey), deliveryAnswer: o.deliveryAnswer });
     if (wrong.eligible) await openOrUpdateCase(pool, o, "wrong_item", wrong);
     const drop = planPriceDrop({ paidCents: o.totalCents, currentCents: await currentTotal(deps, o), refundedCents: o.refundedCents, orderedAt: o.createdAt, now, windowDays: shop.priceProtectionDays });
     if (drop.eligible) await openOrUpdateCase(pool, o, "price_drop", drop);
@@ -270,7 +265,7 @@ export async function refundCase(pool: Pool, deps: AftercareDeps, input: { userI
 
     const plan: Plan =
       c.kind === "wrong_item"
-        ? planWrongItem({ paidCents: o.totalCents, refundedCents: o.refundedCents, shopStatus: o.shopStatus, shippedItem: o.shippedItem, listedName: itemNameOf(o.shopId, o.itemKey) })
+        ? planWrongItem({ paidCents: o.totalCents, refundedCents: o.refundedCents, shopStatus: o.shopStatus, shippedItem: o.shippedItem, listedName: itemNameOf(o.shopId, o.itemKey), deliveryAnswer: o.deliveryAnswer })
         : planPriceDrop({ paidCents: o.totalCents, currentCents: await currentTotal(deps, o), refundedCents: o.refundedCents, orderedAt: o.createdAt, now, windowDays: shop?.priceProtectionDays ?? 0 });
     if (!plan.eligible || !o.captureId || !PAID.has(o.status)) {
       const reason = !o.captureId || !PAID.has(o.status) ? "This order has no payment to refund." : plan.reason;

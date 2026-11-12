@@ -99,14 +99,35 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
     setSettling((x) => new Set(x).add(id));
   }
 
+  // When the map has finished, the list is loaded again, and the requests stop saying "searching" only once the new list has
+  // arrived (not before, or a request would flash "not finished" for a moment). A slow or failed load does not hold them for long.
+  const [reloading, setReloading] = useState(false);
+  const listBefore = useRef<unknown>(null);
+  const goingNow = useRef(going);
+  goingNow.current = going;
   useEffect(() => {
-    if (settling.size === 0 || !live.idle) return;
-    setSettling(new Set());
+    if (settling.size === 0 || !live.idle || reloading) return;
+    listBefore.current = requests.data;
+    setReloading(true);
     requests.reload();
     refreshMe();
-    if (going.size === 0) holdUpdates(false); // tells the top message and the tab count to look again
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settling, live.idle]);
+  }, [settling, live.idle, reloading]);
+  useEffect(() => {
+    if (!reloading) return;
+    const finish = () => {
+      setReloading(false);
+      setSettling(new Set());
+      if (goingNow.current.size === 0) holdUpdates(false); // tells the top message and the tab count to look again
+    };
+    if (requests.data !== listBefore.current || requests.error) {
+      finish();
+      return;
+    }
+    const t = window.setTimeout(finish, 6000);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloading, requests.data, requests.error]);
   useEffect(() => () => holdUpdates(false), []);
 
   // A request that was just created starts looking straight away. Nobody presses Run.

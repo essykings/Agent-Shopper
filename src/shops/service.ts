@@ -123,3 +123,55 @@ export async function deliverOrder(pool: Pool, orderId: string): Promise<void> {
   await openOrder(pool, orderId);
   await pool.query("update shop_orders set status = 'delivered', updated_at = now() where order_id = $1", [orderId]);
 }
+
+// ---------- orders move on by themselves ----------
+
+/** How long an order takes: when the shop ships it, and the shortest and longest time until it is delivered. */
+export interface DeliveryTimes {
+  shipAfterMs: number;
+  deliverMinMs: number;
+  deliverMaxMs: number;
+}
+
+const HOUR_MS = 3_600_000;
+/** What a real shop is like: shipped within a working day, delivered one to two days after it was ordered. */
+export const REAL_DELIVERY: DeliveryTimes = { shipAfterMs: 6 * HOUR_MS, deliverMinMs: 24 * HOUR_MS, deliverMaxMs: 48 * HOUR_MS };
+
+/** How long this order takes to arrive: between the shortest and longest, and always the same for the same order. */
+export function deliveryDelayMs(orderId: string, t: DeliveryTimes): number {
+  const spread = Math.max(0, t.deliverMaxMs - t.deliverMinMs);
+  const n = Number.parseInt(orderId.replace(/-/g, "").slice(0, 8), 16);
+  return t.deliverMinMs + (Number.isFinite(n) ? n % (spread + 1) : 0);
+}
+
+/**
+ * Ships and delivers every order whose time has come, shipped as listed. (The control panel can make an order ship with the wrong
+ * item, to test a delivery problem.) Returns how many orders were shipped and how many delivered.
+ */
+export async function advanceShipping(pool: Pool, t: DeliveryTimes): Promise<{ shipped: number; delivered: number }> {
+  const due = await pool.query<{ order_id: string; status: string; age_ms: number }>(
+    `select order_id, status, (extract(epoch from (now() - created_at)) * 1000)::float8 as age_ms
+     from shop_orders where status in ('received', 'shipped') order by created_at limit 200`,
+  );
+  let shipped = 0;
+  let delivered = 0;
+  for (const row of due.rows) {
+    try {
+      let status = row.status;
+      if (status === "received" && row.age_ms >= t.shipAfterMs) {
+        await shipOrder(pool, row.order_id, false);
+        status = "shipped";
+        shipped++;
+      }
+      if (status === "shipped" && row.age_ms >= deliveryDelayMs(row.order_id, t)) {
+        await deliverOrder(pool, row.order_id);
+        delivered++;
+      }
+    } catch (err) {
+      // An order someone else just moved on (the control panel) is not a problem.
+      if (!(err instanceof ShopControlError)) throw err;
+    }
+  }
+  return { shipped, delivered };
+}
+

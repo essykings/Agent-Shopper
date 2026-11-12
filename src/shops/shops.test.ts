@@ -14,7 +14,7 @@ import { createControlApp } from "./control-app.ts";
 import { prefixLinks } from "./base-path.ts";
 import { createShopsApp } from "./mount.ts";
 import { createPageFetcher, extractLinks } from "../agent/pages.ts";
-import { getPriceAdjust, getShopOrder, markLate, receiveOrder, seedShops } from "./service.ts";
+import { REAL_DELIVERY, deliveryDelayMs, getPriceAdjust, getShopOrder, markLate, receiveOrder, seedShops } from "./service.ts";
 
 const NOW = new Date("2026-11-11T12:00:00Z");
 const shop = (id: string) => findShop(id)!;
@@ -539,5 +539,16 @@ test("links on a shop's page are found by their address under the shop, and link
   };
   const links = extractLinks(page, "http://app.test/shops/northgear");
   assert.deepEqual(links.map((l) => l.url), ["http://app.test/shops/northgear/products/earbuds", "http://app.test/shops/northgear/about"], "product first, then the rest, only this shop");
+});
+
+test("an order takes 24 to 48 hours to arrive, the same for the same order, and a test can set it to nothing", () => {
+  const ids = Array.from({ length: 200 }, (_, i) => `${(i * 2654435761 % 4294967296).toString(16).padStart(8, "0")}-aaaa-bbbb-cccc-dddddddddddd`);
+  const hours = ids.map((id) => deliveryDelayMs(id, REAL_DELIVERY) / 3_600_000);
+  assert.ok(hours.every((h) => h >= 24 && h <= 48), `all between 24 and 48 hours: ${Math.min(...hours)} to ${Math.max(...hours)}`);
+  assert.ok(new Set(hours.map((h) => Math.floor(h))).size > 10, "spread over the range, not all the same");
+  assert.equal(deliveryDelayMs(ids[7]!, REAL_DELIVERY), deliveryDelayMs(ids[7]!, REAL_DELIVERY), "the same every time for the same order");
+  assert.equal(REAL_DELIVERY.shipAfterMs, 6 * 3_600_000);
+  assert.equal(deliveryDelayMs(ids[3]!, { shipAfterMs: 0, deliverMinMs: 0, deliverMaxMs: 0 }), 0);
+  assert.equal(deliveryDelayMs("not-an-id", { shipAfterMs: 0, deliverMinMs: 5, deliverMaxMs: 5 }), 5, "an odd id still gives a sensible delay");
 });
 
