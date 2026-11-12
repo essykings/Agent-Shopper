@@ -14,3 +14,6 @@ web/dist/
 
 # the demo video's recordings and voice clips
 video/
+
+# local Claude settings and launch file
+.claude/
