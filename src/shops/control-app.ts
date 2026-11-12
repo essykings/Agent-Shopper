@@ -5,6 +5,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Pool } from "../server/db.ts";
+import { underPrefix } from "./base-path.ts";
 import { SHOPS, findProduct, findShop } from "./catalog.ts";
 import { renderControl } from "./pages.ts";
 import type { ControlOrder, ControlShop } from "./pages.ts";
@@ -15,6 +16,8 @@ export interface ControlOptions {
   now?: () => Date;
   /** Where each shop lives, shown as a link. */
   shopUrl?: (shopId: string) => string;
+  /** Where the panel lives inside a bigger site, for example "/control". Empty means it has an address of its own. */
+  basePath?: string;
 }
 
 const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
@@ -23,6 +26,8 @@ const sameToken = (a: string, b: string): boolean => timingSafeEqual(digest(a), 
 export function createControlApp(pool: Pool, opts: ControlOptions = {}): Hono {
   const app = new Hono();
   const now = (): Date => (opts.now ?? (() => new Date()))();
+  // The panel is private and holds forms, so it too gets the strict page policy (no scripts), and its links move under its path.
+  underPrefix(app, opts.basePath ?? "");
 
   app.use("*", async (c, next) => {
     if (!opts.token) return next();

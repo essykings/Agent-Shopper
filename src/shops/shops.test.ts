@@ -11,6 +11,9 @@ import { PRODUCTS_PER_SHOP, SHOPS, categoriesOf, findProduct, findShop, searchPr
 import { PER_PAGE, arrivesOn, escapeHtml, money, pageText, priceNow, renderAbout, renderProduct, renderSearch, renderShopHome } from "./pages.ts";
 import { createShopApp } from "./shop-app.ts";
 import { createControlApp } from "./control-app.ts";
+import { prefixLinks } from "./base-path.ts";
+import { createShopsApp } from "./mount.ts";
+import { createPageFetcher, extractLinks } from "../agent/pages.ts";
 import { getPriceAdjust, getShopOrder, markLate, receiveOrder, seedShops } from "./service.ts";
 
 const NOW = new Date("2026-11-11T12:00:00Z");
@@ -458,5 +461,83 @@ test("a search that has extra words still finds the product: filler is ignored, 
   const page = pageText(renderSearch(trail, "water bottle for hiking", undefined, loose.products, 0, NOW, { page: 1, sort: "relevance", closest: true }));
   assert.match(page, /closest matches/);
   assert.doesNotMatch(pageText(renderSearch(trail, "water bottle", undefined, searchShop(trail, "water bottle").products, 0, NOW, { page: 1, sort: "relevance" })), /closest matches/);
+});
+
+// ---------- the shops under a path of the main app ----------
+
+test("prefixLinks moves root links under a path, and nothing else", () => {
+  assert.equal(prefixLinks('<a href="/">Home</a> <a href="/search?q=a">s</a> <form action="/price">', "/shops/x"), '<a href="/shops/x/">Home</a> <a href="/shops/x/search?q=a">s</a> <form action="/shops/x/price">');
+  assert.equal(prefixLinks("<a href='/about'>a</a>", "/shops/x"), "<a href='/shops/x/about'>a</a>");
+  assert.equal(prefixLinks('<a href="https://other.example/x">o</a> <a href="//cdn.example/x">c</a> <a href="page">p</a>', "/shops/x"), '<a href="https://other.example/x">o</a> <a href="//cdn.example/x">c</a> <a href="page">p</a>', "full, protocol-relative and relative links are left alone");
+  assert.equal(prefixLinks('<a href="/">Home</a>', ""), '<a href="/">Home</a>', "no prefix, no change");
+});
+
+test("a shop under a path: every link stays inside it, pages carry a no-scripts policy, and an order page works", { skip }, async () => {
+  const mounted = createShopsApp(pool, { publicUrl: "http://app.test", now: () => NOW });
+  for (const shop of SHOPS) {
+    const base = `/shops/${shop.id}`;
+    const product = shop.products[0]!;
+    for (const path of ["/", "/search?q=bottle", `/search?category=${product.category}`, `/products/${product.key}`, "/about", "/no-such-page"]) {
+      const res = await mounted.request(`${base}${path}`);
+      assert.ok(res.status === 200 || (path === "/no-such-page" && res.status === 404), `${base}${path} answered ${res.status}`);
+      const html = await res.text();
+      const stray = [...html.matchAll(/\b(?:href|action|src)=["']\/(?!shops\/)[^"']*["']/g)].map((m) => m[0]);
+      assert.deepEqual(stray, [], `${base}${path} has links that leave the shop`);
+      assert.match(res.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+      assert.doesNotMatch(res.headers.get("content-security-policy") ?? "", /script-src|unsafe-eval/);
+      if (path === "/") assert.match(html, new RegExp(`href="${base}/search`), "the search form and department links are under the shop");
+    }
+  }
+  assert.equal((await mounted.request("/shops/nowhere/")).status, 404);
+  assert.equal((await mounted.request("/api/me")).status, 404, "the mounted shops answer for nothing else");
+});
+
+test("the control panel is only served with a password (or locally), keeps its links under /control, and still changes prices", { skip }, async () => {
+  const none = createShopsApp(pool, { publicUrl: "http://app.test" });
+  assert.equal((await none.request("/control/")).status, 404, "no password and not local: not there at all");
+
+  const local = createShopsApp(pool, { publicUrl: "http://app.test", allowOpenControl: true });
+  assert.equal((await local.request("/control/")).status, 200);
+
+  const guarded = createShopsApp(pool, { publicUrl: "http://app.test", controlToken: "a-long-enough-secret" });
+  assert.equal((await guarded.request("/control/")).status, 401);
+  assert.equal((await guarded.request("/control/?token=wrong-wrong-wrong")).status, 401);
+  const page = await guarded.request("/control/?token=a-long-enough-secret");
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /action="\/control\/price"/);
+  assert.match(html, /href="http:\/\/app\.test\/shops\/northgear"/, "each shop is linked at its address on the app");
+
+  const body = new URLSearchParams({ token: "a-long-enough-secret", shopId: "northgear", pct: "-15" });
+  const res = await guarded.request("/control/price", { method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded" } });
+  assert.equal(res.status, 303);
+  assert.equal(res.headers.get("location"), "/control/?token=a-long-enough-secret", "it comes back to the panel, not to the app");
+  assert.equal(await getPriceAdjust(pool, "northgear"), -15);
+  await guarded.request("/control/price", { method: "POST", body: new URLSearchParams({ token: "a-long-enough-secret", shopId: "northgear", pct: "0" }), headers: { "content-type": "application/x-www-form-urlencoded" } });
+});
+
+test("the page reader can open only addresses under the shops' own paths, never the rest of the app", async () => {
+  const seen: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request) => {
+    seen.push(String(input));
+    return new Response("<html><title>ok</title><body>fine</body></html>", { status: 200 });
+  }) as unknown as typeof fetch;
+  const read = createPageFetcher({ allowedHosts: ["app.test"], allowedPrefixes: ["http://app.test/shops/northgear", "http://app.test/shops/trailhead"], fetchImpl });
+  assert.equal((await read("http://app.test/shops/northgear/")).status, 200);
+  assert.equal((await read("http://app.test/shops/northgear")).status, 200);
+  assert.equal((await read("http://app.test/shops/trailhead/search?q=x")).status, 200);
+  for (const bad of ["http://app.test/api/me", "http://app.test/", "http://app.test/control/", "http://app.test/shops/deal-zone/", "http://app.test/shops/northgear-evil/", "http://app.test/shops/northgearx", "http://app.test/shops/../api/me", "http://other.test/shops/northgear/"]) {
+    await assert.rejects(read(bad), /not one of the shops|is not one of/, bad);
+  }
+  assert.deepEqual(seen.length, 3, "nothing outside the shops was fetched");
+});
+
+test("links on a shop's page are found by their address under the shop, and links that leave it are left out", () => {
+  const page = {
+    url: "http://app.test/shops/northgear/search?q=x", status: 200, title: "", text: "",
+    html: `<a href="/shops/northgear/products/earbuds">Wireless earbuds</a><a href="/shops/northgear/about">About</a><a href="/shops/trailhead/products/daypack">Other shop</a><a href="/api/me">API</a><a href="/#/orders">App</a><a href="/shops/northgearx/products/a">Lookalike</a>`,
+  };
+  const links = extractLinks(page, "http://app.test/shops/northgear");
+  assert.deepEqual(links.map((l) => l.url), ["http://app.test/shops/northgear/products/earbuds", "http://app.test/shops/northgear/about"], "product first, then the rest, only this shop");
 });
 

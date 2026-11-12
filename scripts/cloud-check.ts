@@ -1,11 +1,11 @@
 // Tests the DEPLOYED app, from your machine, over the real internet.
 //
 //   node scripts/cloud-check.ts https://agent-shopper-app.onrender.com
-//   node scripts/cloud-check.ts <app address> --control <control panel address> --shops <northgear address>,<deal-zone address>,<trailhead address>
+//   (the shops live at <app>/shops/<name> and the control panel at <app>/control, so one address is enough)
 //
 // Settings are read from the environment by name and never printed:
 //   DIAG_TOKEN      the app's DIAG_TOKEN (Render dashboard > the app > Environment). Needed for the address check.
-//   CONTROL_TOKEN   the control panel's CONTROL_TOKEN. Needed for the price-drop and wrong-item refund test.
+//   CONTROL_TOKEN   the app's CONTROL_TOKEN (the control panel's password). Needed for the price-drop and wrong-item refund test.
 //
 // What it does NOT do: spend money. The full purchase flow only runs when the app says it is in mock mode
 // (a scripted shopper and a pretend PayPal). On a live app it checks everything else and skips that part.
@@ -14,17 +14,13 @@
 import { ipBucket } from "../src/server/net.ts";
 
 const args = process.argv.slice(2);
-const flag = (name: string): string | undefined => {
-  const i = args.indexOf(name);
-  return i >= 0 ? args[i + 1] : undefined;
-};
 const appUrl = (args.find((a) => /^https?:\/\//.test(a)) ?? "").replace(/\/$/, "");
 if (!appUrl) {
-  console.error("Usage: node scripts/cloud-check.ts https://<your app>.onrender.com [--control <address>] [--shops <a>,<b>,<c>] [--quick]");
+  console.error("Usage: node scripts/cloud-check.ts https://<your app>.onrender.com [--quick]");
   process.exit(1);
 }
-const controlUrl = (flag("--control") ?? "").replace(/\/$/, "");
-const shopUrls = (flag("--shops") ?? "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean);
+const controlUrl = `${appUrl}/control`;
+const shopUrls = ["northgear", "deal-zone", "trailhead"].map((id) => `${appUrl}/shops/${id}`);
 const quick = args.includes("--quick");
 const diagToken = process.env["DIAG_TOKEN"] ?? "";
 const controlToken = process.env["CONTROL_TOKEN"] ?? "";
@@ -181,7 +177,7 @@ if (!diagToken) {
   }
 }
 
-// ---- 4. the shops, if their public addresses were given ----
+// ---- 4. the shops, which are part of the app ----
 for (const url of shopUrls) {
   try {
     const health = await call("GET", url, "/health", { timeoutMs: 120_000 });
@@ -222,8 +218,8 @@ async function fullFlow(): Promise<void> {
   check(orders.json?.orders?.length === 1 && orders.json.orders[0].status === "paid_out" && orders.json.orders[0].shopStatus === "received", "The shop received the order", JSON.stringify(orders.json?.orders?.[0] ?? null).slice(0, 300));
 
   // The owner's control panel: the shop drops its price and ships the wrong item, then the owner presses refund.
-  if (!controlUrl || !controlToken) {
-    report("SKIP", "Price drop, wrong item and refund", "Pass --control <address> and set CONTROL_TOKEN to test this.");
+  if (!controlToken) {
+    report("SKIP", "Price drop, wrong item and refund", "Set CONTROL_TOKEN (the app's, from Render's Environment tab) to test this.");
     return;
   }
   const orderId: string = orders.json.orders[0].id;

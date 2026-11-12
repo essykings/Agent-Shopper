@@ -37,8 +37,6 @@ export interface AppDeps {
   buy: BuyDeps;
   limits: Limits;
   shops: ShopRef[];
-  /** Where a person's browser can open each shop (the addresses in "shops" may be private to the servers). Falls back to those. */
-  shopLinks?: Record<string, string>;
   sessionSecret: string;
   secureCookies: boolean;
   /** The saved sandbox buyer PayPal that every demo account pays with, unless the person connects their own. */
@@ -327,7 +325,7 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
       const about = parseAbout({ url: "http://x/about", status: 200, html: renderAbout(s), text: pageText(renderAbout(s)), title: "" });
       const report = scoreSeller(about, { now: now(), injectionSeen: s.hiddenInstruction !== undefined });
       out.push({
-        id: s.id, name: s.name, tagline: s.tagline, url: deps.shopLinks?.[s.id] ?? deps.shops.find((x) => x.id === s.id)?.baseUrl ?? null, score: report.score, findings: report.findings.map((f) => f.text),
+        id: s.id, name: s.name, tagline: s.tagline, url: deps.shops.find((x) => x.id === s.id)?.baseUrl ?? null, score: report.score, findings: report.findings.map((f) => f.text),
         categories: [...new Set(s.products.map((p) => p.category))],
       });
     }

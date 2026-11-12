@@ -12,7 +12,8 @@ import type { Pool } from "../server/db.ts";
 import { FakePayPal } from "../server/fake-paypal.ts";
 import { DEFAULT_LIMITS } from "../server/limits.ts";
 import type { Limits } from "../server/limits.ts";
-import { findShop } from "../shops/catalog.ts";
+import { SHOPS, findShop } from "../shops/catalog.ts";
+import { createShopsApp, shopAddress } from "../shops/mount.ts";
 import { createShopApp } from "../shops/shop-app.ts";
 import { seedShops, setPriceAdjust, shipOrder } from "../shops/service.ts";
 import { createMandate } from "../server/mandates.ts";
@@ -77,11 +78,14 @@ after(async () => {
   await admin!.end();
 });
 
-function harness(over: { limits?: Partial<Limits>; model?: ModelPort; mock?: boolean; hub?: Hub; diagToken?: string } = {}) {
+/** pathShops: the shops live under /shops/<name> of the app itself and are read in process, as on Render. Otherwise each has its own host. */
+function harness(over: { limits?: Partial<Limits>; model?: ModelPort; mock?: boolean; hub?: Hub; diagToken?: string; pathShops?: boolean } = {}) {
   const apps = new Map(REFS.map((r) => [new URL(r.baseUrl).host, createShopApp(pool, findShop(r.id)!, { now: () => NOW })]));
+  const shopsApp = over.pathShops ? createShopsApp(pool, { publicUrl: "http://app.test", now: () => NOW }) : null;
+  const shopRefs: ShopRef[] = over.pathShops ? SHOPS.map((s) => ({ id: s.id, baseUrl: shopAddress("http://app.test", s.id) })) : REFS;
   const fetchImpl = (async (input: string | URL | Request) => {
     const u = new URL(String(input));
-    return apps.get(u.host)!.request(u.pathname + u.search);
+    return shopsApp ? shopsApp.request(u.pathname + u.search) : apps.get(u.host)!.request(u.pathname + u.search);
   }) as unknown as typeof fetch;
   const fake = new FakePayPal();
   const mock = createMockModel();
@@ -91,9 +95,16 @@ function harness(over: { limits?: Partial<Limits>; model?: ModelPort; mock?: boo
     return mock(p);
   });
   const deps: AppDeps = {
-    buy: { paypal: fake, model, fetchPage: createPageFetcher({ allowedHosts: [...apps.keys()], fetchImpl }), now: () => NOW },
+    buy: {
+      paypal: fake,
+      model,
+      fetchPage: over.pathShops
+        ? createPageFetcher({ allowedHosts: ["app.test"], allowedPrefixes: shopRefs.map((r) => r.baseUrl), fetchImpl })
+        : createPageFetcher({ allowedHosts: [...apps.keys()], fetchImpl }),
+      now: () => NOW,
+    },
     limits: { ...DEFAULT_LIMITS, ...over.limits },
-    shops: REFS,
+    shops: shopRefs,
     sessionSecret: SECRET,
     secureCookies: false,
     demoVaultId: "VAULT-DEMO",
@@ -302,19 +313,33 @@ test("a wordy request still finds the product, and an item no shop sells is trie
   assert.equal((await b.get("/api/requests")).json.requests.find((r: any) => r.id === nothing.json.id).status, "active", "nothing bought, nothing charged, still open");
 });
 
-test("each shop comes with an address a browser can open: the public one if there is one, otherwise the one the app uses", { skip }, async () => {
+test("each shop comes with an address a browser can open", { skip }, async () => {
   const { b } = await signedIn();
   const shops = (await b.get("/api/shops")).json.shops as Array<{ id: string; url: string }>;
   assert.deepEqual(shops.map((s) => [s.id, s.url]), REFS.map((r) => [r.id, r.baseUrl]));
+});
 
-  const h = harness();
-  h.deps.shopLinks = { northgear: "https://agent-shopper-northgear.example" };
-  const api2 = createApi(pool, h.deps);
-  const b2 = browser(api2, "203.0.113.77");
-  assert.equal((await b2.login()).status, 200);
-  const shops2 = (await b2.get("/api/shops")).json.shops as Array<{ id: string; url: string }>;
-  assert.equal(shops2.find((s) => s.id === "northgear")!.url, "https://agent-shopper-northgear.example", "the public address wins");
-  assert.equal(shops2.find((s) => s.id === "trailhead")!.url, REFS.find((r) => r.id === "trailhead")!.baseUrl, "and a shop without one falls back");
+test("with the shops under /shops/<name> of the app, the whole story still works: buy, price drop, refund", { skip }, async () => {
+  const { b, fake } = await signedIn(harness({ pathShops: true }));
+  const shops = (await b.get("/api/shops")).json.shops as Array<{ id: string; url: string }>;
+  assert.deepEqual(shops.map((s) => s.url), ["http://app.test/shops/northgear", "http://app.test/shops/deal-zone", "http://app.test/shops/trailhead"]);
+
+  const { json: created } = await b.post("/api/requests", { kind: "item", item: "Water bottle for hiking", maxPriceCents: 3500 });
+  const run = await b.post(`/api/requests/${created.id}/run`);
+  assert.equal(run.json.stage, "purchase");
+  assert.equal(run.json.result.status, "paid_out");
+  const opened = (run.json.actions as Array<{ summary: string }>).map((a) => a.summary);
+  assert.ok(opened.some((s) => /app\.test\/shops\/trailhead\/products\/water-bottle/.test(s)), `opened ${JSON.stringify(opened.slice(0, 6))}`);
+  assert.ok(opened.every((s) => !/app\.test\/(api|#)/.test(s)), "nothing outside the shops was opened");
+
+  await setPriceAdjust(pool, "trailhead", -15);
+  const cases = (await b.post("/api/aftercare/check")).json.cases;
+  assert.equal(cases.length, 1);
+  assert.equal(cases[0].kind, "price_drop");
+  const refund = await b.post(`/api/cases/${cases[0].id}/refund`);
+  assert.equal(refund.json.result.status, "refunded", JSON.stringify(refund.json));
+  assert.equal(refund.json.result.amountCents, 360, "15% of the $24.00 paid");
+  assert.equal(fake.calls.filter((c) => c.method === "refund").length, 1);
 });
 
 test("above the ask-me limit the owner must approve the exact amount they saw", { skip }, async () => {

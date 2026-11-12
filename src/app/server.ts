@@ -14,10 +14,11 @@ import { createPool, migrate, waitForDatabase } from "../server/db.ts";
 import { FakePayPal } from "../server/fake-paypal.ts";
 import { limitsFromEnv, pruneAdmissions } from "../server/limits.ts";
 import { createPayPalClient } from "../server/paypal.ts";
+import { SHOPS } from "../shops/catalog.ts";
+import { createShopsApp, shopAddress } from "../shops/mount.ts";
 import { seedShops } from "../shops/service.ts";
 import { createApi } from "./api.ts";
 import { createMockModel } from "./mock.ts";
-import { normalizeBaseUrl } from "./urls.ts";
 
 const env = process.env;
 const fail = (message: string): never => {
@@ -37,43 +38,20 @@ if (!sessionSecret) {
   console.warn("SESSION_SECRET is not set, so a temporary one is used: everyone is signed out whenever the app restarts.");
 }
 
-// On Render these are the shops' private addresses ("shop-northgear:10000"), which have no http:// in front.
-const shopUrl = (name: string, fallback: string): string => {
-  try {
-    return normalizeBaseUrl(env[name]?.trim() || fallback);
-  } catch (err) {
-    return fail(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-};
-const shops: ShopRef[] = [
-  { id: "northgear", baseUrl: shopUrl("SHOP_NORTHGEAR_URL", "http://northgear.localhost:4101") },
-  { id: "deal-zone", baseUrl: shopUrl("SHOP_DEAL_ZONE_URL", "http://deal-zone.localhost:4102") },
-  { id: "trailhead", baseUrl: shopUrl("SHOP_TRAILHEAD_URL", "http://trailhead.localhost:4103") },
-];
-
-// Where people's browsers open each shop. On Render the addresses above are private, so these are the public ones.
-const publicShop = (name: string, ref: ShopRef): string => {
-  const given = env[name]?.trim();
-  if (!given) return ref.baseUrl;
-  try {
-    return new URL(given).toString().replace(/\/$/, "");
-  } catch {
-    return fail(`${name} must be a full address such as https://agent-shopper-northgear.onrender.com`);
-  }
-};
-const shopLinks: Record<string, string> = {
-  northgear: publicShop("SHOP_NORTHGEAR_PUBLIC_URL", shops[0]!),
-  "deal-zone": publicShop("SHOP_DEAL_ZONE_PUBLIC_URL", shops[1]!),
-  trailhead: publicShop("SHOP_TRAILHEAD_PUBLIC_URL", shops[2]!),
-};
-
 const port = Number(env["PORT"] ?? 3000);
 // PayPal sends people back to this address after they approve, so it must be the address people really use.
 // Render tells each web service its own address in RENDER_EXTERNAL_URL, so PUBLIC_URL only needs setting for a custom domain.
 const publicUrl = (env["PUBLIC_URL"]?.trim() || env["RENDER_EXTERNAL_URL"]?.trim() || (production ? fail("PUBLIC_URL must be set when NODE_ENV=production, for example https://your-app.onrender.com.") : `http://localhost:${port}`)).replace(/\/$/, "");
 
+// The demo shops live inside this app, at /shops/<name>, and so does the owner's control panel at /control.
+const shops: ShopRef[] = SHOPS.map((shop) => ({ id: shop.id, baseUrl: shopAddress(publicUrl, shop.id) }));
+const controlToken = env["CONTROL_TOKEN"]?.trim();
+if (controlToken && controlToken.length < 12) fail("CONTROL_TOKEN must be at least 12 characters.");
+if (production && !controlToken) console.warn("CONTROL_TOKEN is not set, so the control panel is not available. Set it to use /control.");
+
 const pool = createPool(need("DATABASE_URL"));
 await waitForDatabase(pool, { log: console.log });
+const shopsApp = createShopsApp(pool, { publicUrl, ...(controlToken ? { controlToken } : {}), allowOpenControl: !production });
 await migrate(pool);
 await seedShops(pool, env["SHOP_PAYEE_EMAIL"]?.trim() || (mock ? "shop@example.com" : need("SHOP_PAYEE_EMAIL")));
 
@@ -90,21 +68,30 @@ const api = createApi(pool, {
   buy: {
     paypal: mock ? new FakePayPal() : createPayPalClient({ clientId: need("PAYPAL_CLIENT_ID"), clientSecret: need("PAYPAL_CLIENT_SECRET"), ...(env["PAYPAL_WEBHOOK_ID"]?.trim() ? { webhookId: env["PAYPAL_WEBHOOK_ID"].trim() } : {}) }),
     model,
-    fetchPage: createPageFetcher({ allowedHosts: shops.map((s) => new URL(s.baseUrl).host) }),
+    // The shopper reads the shops inside this process (no network), and only addresses under /shops/<name>: never this app's own API or screens.
+    fetchPage: createPageFetcher({
+      allowedHosts: [new URL(publicUrl).host],
+      allowedPrefixes: shops.map((x) => x.baseUrl),
+      fetchImpl: (async (input: string | URL | Request) => {
+        const u = new URL(String(input));
+        return shopsApp.request(`${u.pathname}${u.search}`);
+      }) as typeof fetch,
+    }),
   },
   limits,
   shops,
   sessionSecret,
   secureCookies: production,
   publicUrl,
-  shopLinks,
   ...(env["DIAG_TOKEN"]?.trim() ? { diagToken: env["DIAG_TOKEN"].trim() } : {}),
   demoVaultId: env["DEMO_VAULT_ID"]?.trim() || env["VAULT_ID"]?.trim() || (mock ? "MOCK-VAULT" : need("DEMO_VAULT_ID")),
   mock,
 });
 
-const app = new Hono();
+// Not strict about a trailing slash, so a shop's address works with or without one at the end.
+const app = new Hono({ strict: false });
 app.route("/", api);
+app.route("/", shopsApp);
 // An unknown address under /api is an error for the caller, not the home page.
 app.all("/api/*", (c) => c.json({ error: "Not found." }, 404));
 if (existsSync("./web/dist/index.html")) {

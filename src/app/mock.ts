@@ -148,7 +148,7 @@ export function createMockModel(opts: { delayMs?: number } = {}): ModelPort {
       for (const b of m.content) {
         if (b.type !== "tool_use" || b.name !== "open_page") continue;
         const u = new URL(String((b.input as { url?: string }).url));
-        if (u.pathname !== "/search") continue;
+        if (!u.pathname.endsWith("/search")) continue;
         // A department listing is a try too, but it is only browsing: it never finds the item.
         const q = u.searchParams.has("category") ? `dept:${u.searchParams.get("category")}` : (u.searchParams.get("q") ?? "").toLowerCase();
         if (!tried.includes(q)) tried.push(q);

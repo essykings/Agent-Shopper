@@ -1,8 +1,9 @@
-// One demo shop as its own small website. Each shop runs as its own service with its own address,
-// so an agent visiting it really is visiting a separate site.
+// One demo shop as a small website of its own: its own pages, its own prices and orders. It can run on an address
+// of its own, or under a path of the main app (see base-path.ts).
 
 import { Hono } from "hono";
 import type { Pool } from "../server/db.ts";
+import { underPrefix } from "./base-path.ts";
 import { findProduct, searchShop } from "./catalog.ts";
 import type { ShopDef } from "./catalog.ts";
 import { renderAbout, renderNotFound, renderOrder, renderProduct, renderSearch, renderShopHome } from "./pages.ts";
@@ -11,8 +12,10 @@ import { getPriceAdjust, getShopOrder } from "./service.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function createShopApp(pool: Pool, shop: ShopDef, opts: { now?: () => Date } = {}): Hono {
+/** basePath is where the shop lives inside a bigger site, for example "/shops/northgear". Empty means it has an address of its own. */
+export function createShopApp(pool: Pool, shop: ShopDef, opts: { now?: () => Date; basePath?: string } = {}): Hono {
   const app = new Hono();
+  underPrefix(app, opts.basePath ?? "");
   const now = (): Date => (opts.now ?? (() => new Date()))();
 
   // Prices change from the control panel, so nothing here may be cached.

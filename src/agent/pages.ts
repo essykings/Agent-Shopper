@@ -24,6 +24,11 @@ export class PageFetchError extends Error {
 export interface FetcherOptions {
   /** Hosts with port, for example northgear.localhost:4101. Anything else is refused. */
   allowedHosts: string[];
+  /**
+   * When the shops live under paths of one site (http://app/shops/northgear), only addresses under these prefixes may be
+   * opened, so the rest of that site (its API, its screens) can never be read. Without this, any path on an allowed host is fine.
+   */
+  allowedPrefixes?: string[];
   timeoutMs?: number;
   maxBytes?: number;
   fetchImpl?: typeof fetch;
@@ -46,8 +51,11 @@ const MAX_OTHER_LINKS = 14;
  * addresses. Only links to the same shop count, product links first. The shop wrote the link text, so
  * like the rest of the page it is untrusted; the page reader refuses any other site anyway.
  */
-export function extractLinks(page: FetchedPage): PageLink[] {
+export function extractLinks(page: FetchedPage, shopBase?: string): PageLink[] {
   const base = new URL(page.url);
+  // Where the shop starts: its own address, or a path of a bigger site. Links that leave it do not count.
+  const scope = new URL(shopBase ?? base.origin);
+  const scopePath = scope.pathname.replace(/\/$/, "");
   const products: PageLink[] = [];
   const others: PageLink[] = [];
   const seen = new Set<string>();
@@ -58,13 +66,14 @@ export function extractLinks(page: FetchedPage): PageLink[] {
     } catch {
       continue;
     }
-    if (target.host !== base.host || (target.protocol !== "http:" && target.protocol !== "https:")) continue;
+    if (target.host !== scope.host || (target.protocol !== "http:" && target.protocol !== "https:")) continue;
+    if (scopePath && target.pathname !== scopePath && !target.pathname.startsWith(`${scopePath}/`)) continue;
     target.hash = "";
     const url = target.toString();
     const text = decode(m[3]!.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim().slice(0, 80);
     if (!text || seen.has(url) || url === page.url) continue;
     seen.add(url);
-    (target.pathname.startsWith("/products/") ? products : others).push({ text, url });
+    (target.pathname.slice(scopePath.length).startsWith("/products/") ? products : others).push({ text, url });
   }
   // Paging links matter most after the products, so they go before the long row of department links.
   const paging = (l: PageLink): number => (/\b(next|previous) page\b/i.test(l.text) ? 0 : 1);
@@ -86,6 +95,9 @@ export function createPageFetcher(opts: FetcherOptions): PageFetcher {
     }
     if (u.protocol !== "http:" && u.protocol !== "https:") throw new PageFetchError("Only web pages can be opened.");
     if (!opts.allowedHosts.includes(u.host)) throw new PageFetchError(`${u.host} is not one of the shops you can browse.`);
+    if (opts.allowedPrefixes && !opts.allowedPrefixes.some((p) => u.href === p || u.href.startsWith(`${p}/`) || u.href.startsWith(`${p}?`))) {
+      throw new PageFetchError("That address is not one of the shops you can browse.");
+    }
     let res: Response;
     try {
       res = await doFetch(u.toString(), { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { accept: "text/html" } });

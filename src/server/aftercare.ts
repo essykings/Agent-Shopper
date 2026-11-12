@@ -116,7 +116,7 @@ async function currentTotal(deps: AftercareDeps, o: OrderFacts): Promise<number 
   const ref = deps.shops.find((s) => s.id === o.shopId);
   if (!ref || !o.itemKey) return null;
   try {
-    return parseProduct(await deps.fetchPage(new URL(`/products/${o.itemKey}`, ref.baseUrl).toString()))?.totalCents ?? null;
+    return parseProduct(await deps.fetchPage(`${ref.baseUrl}/products/${o.itemKey}`))?.totalCents ?? null;
   } catch {
     return null;
   }

@@ -52,15 +52,14 @@ docker compose up -d                 # Postgres on 127.0.0.1:54329. If your Dock
 # docker run -d --name agent-shopper-db -e POSTGRES_USER=shopper -e POSTGRES_PASSWORD=shopper -e POSTGRES_DB=agent_shopper -p 127.0.0.1:54329:5432 postgres:15
 cp .env.example .env                 # the local DATABASE_URL in it already matches
 npm run web:build                    # builds the screens
-npm run shops:local                  # the three shops (ports 4101-4103) and the control panel (4100)
-npm run app:mock                     # in a second terminal: the app on http://localhost:3000
+npm run app:mock                     # the app on http://localhost:3000, with the three shops at /shops/<name> and the control panel at /control
 ```
 
 Open http://localhost:3000 and press **Try the demo**. **Mock mode** uses a scripted shopper and a pretend PayPal, so the whole experience runs without any account or cost. Try:
 
 1. *New request*: "Wireless earbuds". Run it in the **Playground** and watch the guard turn Deal-Zone down.
 2. *New request* > **A gift or an occasion**: "Dad, Christmas, likes hiking and coffee".
-3. Open the control panel (http://localhost:4100), press **Drop 15%** for Northgear, then open **Orders** and press **Check for problems**.
+3. Open the control panel (http://localhost:3000/control/), press **Drop 15%** for Northgear, then open **Orders** and press **Check for problems**.
 4. Open http://localhost:3000/#/town in a second tab to see the public view.
 
 ### With the real Claude model and the PayPal sandbox
@@ -78,13 +77,13 @@ The model is scripted in tests, so they check everything around it: the tools, t
 
 ## Deploy on Render
 
-`render.yaml` is a Blueprint: the app, three shop sites, the owner's control panel and a Postgres database, all in one region. It starts in **mock mode** so deploying and testing in the cloud costs no model or PayPal money. After it is up, `scripts/cloud-check.ts` tests the live address (reachability, the live stream through Render's proxy, which address the app sees, and a full purchase and refund in mock mode):
+`render.yaml` is a Blueprint: one web service (the app, which also serves the three simulated shops at `/shops/<name>` and the owner's control panel at `/control`) and a Postgres database. That is about $13 a month, as Render's pricing page showed on 2026-11-11. It starts in **mock mode** so deploying and testing in the cloud costs no model or PayPal money. After it is up, `scripts/cloud-check.ts` tests the live address (reachability, the live stream through Render's proxy, which address the app sees, and a full purchase and refund in mock mode):
 
 ```bash
-DIAG_TOKEN=... CONTROL_TOKEN=... node scripts/cloud-check.ts https://<app>.onrender.com --control https://<control>.onrender.com
+DIAG_TOKEN=... CONTROL_TOKEN=... node scripts/cloud-check.ts https://<app>.onrender.com
 ```
 
-**Going live** is adding settings in the Render dashboard (the app's Environment tab), then redeploying: `MOCK_SERVICES` removed, plus `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `DEMO_VAULT_ID`, `SHOP_PAYEE_EMAIL` (also on the three shops), and `PAYPAL_WEBHOOK_ID` once a webhook pointing at `https://<app>/api/paypal/webhook` exists in the PayPal developer dashboard. `TRUSTED_PROXY_HOPS` is set to 2 in `render.yaml`, which is what the cloud check measured on Render (the header arrives as the visitor's address followed by a Cloudflare address). Re-run the check if you move hosts, or every visitor could share one daily limit.
+**Going live** is adding settings in the Render dashboard (the app's Environment tab), then redeploying: `MOCK_SERVICES` removed, plus `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `DEMO_VAULT_ID`, `SHOP_PAYEE_EMAIL`, and `PAYPAL_WEBHOOK_ID` once a webhook pointing at `https://<app>/api/paypal/webhook` exists in the PayPal developer dashboard. `TRUSTED_PROXY_HOPS` is set to 2 in `render.yaml`, which is what the cloud check measured on Render (the header arrives as the visitor's address followed by a Cloudflare address). Re-run the check if you move hosts, or every visitor could share one daily limit.
 
 ## Known limits and things not yet verified
 
@@ -101,7 +100,7 @@ DIAG_TOKEN=... CONTROL_TOKEN=... node scripts/cloud-check.ts https://<app>.onren
 |---|---|
 | `src/server/` | the guard, payment service, ledger, PayPal client, refunds, webhooks, abuse limits |
 | `src/agent/` | the shopper agent, page reader, seller scoring |
-| `src/shops/` | the three simulated shops and the control panel |
+| `src/shops/` | the three simulated shops and the control panel (mounted by the app at `/shops/<name>` and `/control`) |
 | `src/app/` | the web app's API, the scripted mock shopper, the live-feed hub |
 | `src/shared/` | types and the live-view logic shared with the screens |
 | `web/` | the React screens |

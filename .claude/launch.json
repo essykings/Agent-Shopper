@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "shops",
+      "name": "app",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["-lc", "source ~/.nvm/nvm.sh && nvm use >/dev/null && npm run shops:local"],
-      "port": 4100
+      "runtimeArgs": ["-lc", "source ~/.nvm/nvm.sh && nvm use >/dev/null && npm run app:mock"],
+      "port": 3000
     }
   ]
 }

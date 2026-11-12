@@ -5,7 +5,7 @@
 // few cents). The PayPal side is the sandbox only: no real funds. It buys earbuds ($45.00 at the honest
 // shop; the scam shop lists them at $29.00 and must be refused).
 //
-// Start the shops and database first:  docker start agent-shopper-db && npm run shops:local
+// Start the shops and database first:  docker start agent-shopper-db && npm run app:mock
 // Run:                                 node --env-file=.env scripts/buy-live.ts
 // Options:  --ask       make the ask-me limit low, so the owner has to approve
 //           --approve   with --ask, approve automatically (otherwise it stops and says what it is waiting for)
@@ -42,16 +42,16 @@ const autoApprove = process.argv.includes("--approve");
 const MODEL = process.env.SHOPPER_MODEL || DEFAULT_MODEL;
 
 const shops: ShopRef[] = [
-  { id: "northgear", baseUrl: "http://northgear.localhost:4101" },
-  { id: "deal-zone", baseUrl: "http://deal-zone.localhost:4102" },
-  { id: "trailhead", baseUrl: "http://trailhead.localhost:4103" },
+  { id: "northgear", baseUrl: "http://localhost:3000/shops/northgear" },
+  { id: "deal-zone", baseUrl: "http://localhost:3000/shops/deal-zone" },
+  { id: "trailhead", baseUrl: "http://localhost:3000/shops/trailhead" },
 ];
 for (const s of shops) {
   try {
     const r = await fetch(`${s.baseUrl}/health`, { signal: AbortSignal.timeout(3000) });
     if (!r.ok) throw new Error(`status ${r.status}`);
   } catch {
-    console.error(`\n${s.id} is not answering at ${s.baseUrl}. Start the shops with: npm run shops:local`);
+    console.error(`\n${s.id} is not answering at ${s.baseUrl}. Start the app first with: npm run app:mock (the shops are part of it)`);
     process.exit(1);
   }
 }
@@ -59,7 +59,7 @@ for (const s of shops) {
 const client = new Anthropic();
 const model: ModelPort = (params) => client.messages.create(params);
 const paypal = createPayPalClient({ clientId: env.PAYPAL_CLIENT_ID, clientSecret: env.PAYPAL_CLIENT_SECRET });
-const fetchPage = createPageFetcher({ allowedHosts: shops.map((s) => new URL(s.baseUrl).host) });
+const fetchPage = createPageFetcher({ allowedHosts: ["localhost:3000"], allowedPrefixes: shops.map((s) => s.baseUrl) });
 
 const schema = `buy_${randomBytes(4).toString("hex")}`;
 const admin = createPool(env.DATABASE_URL);

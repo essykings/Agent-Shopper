@@ -3,7 +3,7 @@
 // which is under $0.08 even at the dearest rate (recent runs cost under 2 cents). It buys nothing and
 // never touches PayPal: it only reads the shops and proposes. It makes no retries.
 //
-// Start the shops and the database first:  npm run shops:local   and   docker start agent-shopper-db
+// Start the shops and the database first:  npm run app:mock   and   docker start agent-shopper-db
 // Run once:   node --env-file=.env scripts/item-live.ts "First aid kit"        (optional second word: most to pay in dollars, default 60)
 // Needs in .env: ANTHROPIC_API_KEY, DATABASE_URL
 
@@ -43,16 +43,16 @@ if (!process.env["ANTHROPIC_API_KEY"] || !process.env["DATABASE_URL"]) {
 }
 
 const shops: ShopRef[] = [
-  { id: "northgear", baseUrl: "http://northgear.localhost:4101" },
-  { id: "deal-zone", baseUrl: "http://deal-zone.localhost:4102" },
-  { id: "trailhead", baseUrl: "http://trailhead.localhost:4103" },
+  { id: "northgear", baseUrl: "http://localhost:3000/shops/northgear" },
+  { id: "deal-zone", baseUrl: "http://localhost:3000/shops/deal-zone" },
+  { id: "trailhead", baseUrl: "http://localhost:3000/shops/trailhead" },
 ];
 for (const s of shops) {
   try {
     const r = await fetch(`${s.baseUrl}/health`, { signal: AbortSignal.timeout(3000) });
     if (!r.ok) throw new Error(`status ${r.status}`);
   } catch {
-    console.error(`\n${s.id} is not answering at ${s.baseUrl}. Start the shops with: npm run shops:local`);
+    console.error(`\n${s.id} is not answering at ${s.baseUrl}. Start the app first with: npm run app:mock (the shops are part of it)`);
     process.exit(1);
   }
 }
@@ -87,7 +87,7 @@ try {
   const run = await runShopperAgent(
     {
       model,
-      fetchPage: createPageFetcher({ allowedHosts: shops.map((s) => new URL(s.baseUrl).host) }),
+      fetchPage: createPageFetcher({ allowedHosts: ["localhost:3000"], allowedPrefixes: shops.map((s) => s.baseUrl) }),
       store: dbStore(pool),
       getGuardFacts: dbGuardFacts(pool, { userId, mandateId, getSellerStatus: async () => "allowed" }),
       modelName: MODEL,

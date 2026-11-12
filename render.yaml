@@ -1,15 +1,15 @@
-# Deploys Agent Shopper on Render: the app, three simulated shops, the owner's control panel and a Postgres database.
+# Deploys Agent Shopper on Render: ONE web service (the app, the three simulated shops at /shops/<name>, and the owner's
+# control panel at /control) and a Postgres database.
 #
 # This first version runs the app in MOCK MODE (a scripted shopper and a pretend PayPal), so deploying it and
 # testing it in the cloud costs no Anthropic or PayPal money. Going live is a few settings added in the Render
 # dashboard (see "Going live" in README.md).
 #
-# Cost (from render.com/pricing, checked 2026-11-11): each web service on plan 0.5c-512mb is $7 a month and does not sleep;
-# the database on plan 0.1c-256mb is $6 a month; the control panel is on the free plan ($0, it sleeps after 15 idle
-# minutes, which does not matter for a private panel). That is 4 x $7 + $6 = $34 a month. Render may also charge a
-# workspace fee depending on your account's plan, which this file cannot know.
+# Cost (from render.com/pricing, checked 2026-11-11): the web service on plan 0.5c-512mb is $7 a month and does not
+# sleep; the database on plan 0.1c-256mb is $6 a month. That is $7 + $6 = $13 a month. (Before the shops moved into
+# the app they were three more services at $7 each.) Render may also charge a workspace fee depending on your
+# account's plan, which this file cannot know.
 #
-# Everything is in one region because Render services only reach each other (and the database) privately inside a region.
 # Render checks this file when you create the Blueprint, and names any key it does not accept.
 
 databases:
@@ -55,110 +55,7 @@ services:
       # Lets scripts/cloud-check.ts ask the app what address it sees. Read it in the dashboard (Environment) to run the check.
       - key: DIAG_TOKEN
         generateValue: true
-      # The shops' private addresses, for example agent-shopper-northgear:10000 (the app adds http:// itself).
-      - key: SHOP_NORTHGEAR_URL
-        fromService:
-          type: web
-          name: agent-shopper-northgear
-          property: hostport
-      - key: SHOP_DEAL_ZONE_URL
-        fromService:
-          type: web
-          name: agent-shopper-deal-zone
-          property: hostport
-      - key: SHOP_TRAILHEAD_URL
-        fromService:
-          type: web
-          name: agent-shopper-trailhead
-          property: hostport
-      # The shops' public addresses, for the links on the Shops page. They must match the addresses Render shows for each shop.
-      - key: SHOP_NORTHGEAR_PUBLIC_URL
-        value: https://agent-shopper-northgear.onrender.com
-      - key: SHOP_DEAL_ZONE_PUBLIC_URL
-        value: https://agent-shopper-deal-zone.onrender.com
-      - key: SHOP_TRAILHEAD_PUBLIC_URL
-        value: https://agent-shopper-trailhead.onrender.com
-
-  # ---- the three simulated shops: one site each, so an agent really visits separate sites ----
-  - type: web
-    name: agent-shopper-northgear
-    runtime: node
-    region: oregon
-    plan: 0.5c-512mb
-    buildCommand: npm ci
-    startCommand: node src/shops/server.ts
-    healthCheckPath: /health
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: PORT
-        value: "10000"
-      - key: SHOP_ID
-        value: northgear
-      - key: DATABASE_URL
-        fromDatabase:
-          name: agent-shopper-db
-          property: connectionString
-
-  - type: web
-    name: agent-shopper-deal-zone
-    runtime: node
-    region: oregon
-    plan: 0.5c-512mb
-    buildCommand: npm ci
-    startCommand: node src/shops/server.ts
-    healthCheckPath: /health
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: PORT
-        value: "10000"
-      - key: SHOP_ID
-        value: deal-zone
-      - key: DATABASE_URL
-        fromDatabase:
-          name: agent-shopper-db
-          property: connectionString
-
-  - type: web
-    name: agent-shopper-trailhead
-    runtime: node
-    region: oregon
-    plan: 0.5c-512mb
-    buildCommand: npm ci
-    startCommand: node src/shops/server.ts
-    healthCheckPath: /health
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: PORT
-        value: "10000"
-      - key: SHOP_ID
-        value: trailhead
-      - key: DATABASE_URL
-        fromDatabase:
-          name: agent-shopper-db
-          property: connectionString
-
-  # ---- the owner's control panel: makes the shops misbehave on cue (price drops, wrong items) ----
-  # Private. It will not start without CONTROL_TOKEN. Open it at https://<its address>/?token=<the token from Environment>.
-  - type: web
-    name: agent-shopper-control
-    runtime: node
-    region: oregon
-    plan: free
-    buildCommand: npm ci
-    startCommand: node src/shops/server.ts
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: PORT
-        value: "10000"
-      - key: CONTROL
-        value: "1"
+      # The password for the control panel at /control (price drops, wrong items). Read it in the dashboard (Environment).
+      # Open the panel at https://<the app's address>/control/?token=<that value>.
       - key: CONTROL_TOKEN
         generateValue: true
-      - key: DATABASE_URL
-        fromDatabase:
-          name: agent-shopper-db
-          property: connectionString
