@@ -1,9 +1,8 @@
 # Deploys Agent Shopper on Render: ONE web service (the app, the three simulated shops at /shops/<name>, and the owner's
 # control panel at /control) and a Postgres database.
 #
-# This first version runs the app in MOCK MODE (a scripted shopper and a pretend PayPal), so deploying it and
-# testing it in the cloud costs no Anthropic or PayPal money. Going live is a few settings added in the Render
-# dashboard (see "Going live" in README.md).
+# This blueprint starts the app in real mode, so it needs the keys listed under "Going live" in README.md. For a free
+# test with a scripted shopper and a pretend PayPal, add MOCK_SERVICES=1 in the dashboard.
 #
 # Cost (from render.com/pricing, checked 2026-11-11): the web service on plan 0.5c-512mb is $7 a month and does not
 # sleep; the database on plan 0.1c-256mb is $6 a month. That is $7 + $6 = $13 a month. (Before the shops moved into

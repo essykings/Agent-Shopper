@@ -2,7 +2,7 @@
 
 **An AI agent that shops for you with PayPal, where plain code, not the AI, decides whether any money moves.**
 
-You tell it what to buy ("wireless earbuds", "a Christmas gift for Dad who likes hiking") and set the rules: a price limit, a deadline, and a minimum shop trust score. The agent browses shops, avoids the scam shop, and proposes a purchase. A rules engine (the *guard*, ordinary code with no model in it) then checks the proposal and decides: allow, ask you first, or refuse. Only then does PayPal move money. After the purchase, the app watches for problems (a price drop, the wrong item) and builds the case for a refund, which you approve with one press.
+You tell it what to buy in plain words ("wireless earbuds", "something to keep my phone charged on a long hike") and the most you will pay. The agent browses three shops, avoids the scam shop, and proposes a purchase. A rules engine (the *guard*, ordinary code with no model in it) then checks the proposal and decides: allow, ask you first, or refuse. Only then does PayPal move money. After the purchase, the app keeps watching: if a shop lowers its price, you are refunded the difference automatically, and when the order is delivered you are asked to confirm it arrived.
 
 Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Everything uses the **PayPal sandbox**: no real money moves.
 
@@ -12,7 +12,7 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Eve
 |---|---|
 | PayPal sandbox: saved-account charges (Vault), authorize and capture, Payouts to shops, refunds, webhook verification | The three shops (Northgear, Deal-Zone, Trailhead). They are small websites in this repo, about 100 products each. Nobody ships anything. |
 | Claude (Haiku 5.5) driving the shopper, reading shop pages as text and links, exactly as a browsing agent would | The scam: Deal-Zone has a new domain, copied five-star reviews, prices far too low, and hidden text aimed at AI readers |
-| A guard, a payment service, an append-only ledger and per-address abuse limits | "What arrived": orders ship and are delivered on their own timeline (shipped within hours, delivered in one to two days), the shop's delivery record says what it shipped, and the owner's control panel makes a shop ship the wrong item or change its price |
+| A guard, a payment service, an append-only ledger and per-address abuse limits | Shop events: orders ship and are delivered on their own timeline (shipped within hours, delivered in one to two days). In the demo, one shop cuts the price of a demo account's first order about a minute after it is placed, so the automatic refund can be seen. The owner's control panel can also change a shop's price or make a shop ship the wrong item |
 
 ## How it works
 
@@ -21,26 +21,24 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Eve
                       │  reads shop pages          │  allow / ask you / refuse      │  hold, re-check, capture,
                       │  checks the seller         │  checks every claim against    │  pay the shop, ledger entry
                       ▼  cannot spend              ▼  the saved page text           ▼
-                 live map (Playground / Town square)                       aftercare: price drop, wrong item,
-                                                                           evidence pack, refund you approve
+                 live map (Playground / Town square)                       aftercare: price drop refunded     
+                                                                           automatically, delivery check  
 ```
 
 - **The agent proposes; the guard decides.** The agent never touches money. Price, arrival date, category and seller score on a proposal are read from the saved page by code, not given by the model. Quotes it relies on must appear on the saved page. "New" claims need new, sealed or unopened wording and no used or refurbished words.
 - **Two guard passes.** The guard runs when the proposal is made and again with a fresh price just before the money is taken. If the price rose, nothing is charged.
 - **Prompt-injection defence.** Page text is untrusted. Hidden text aimed at AI readers is detected and lowers the shop's score, and the agent is told never to follow instructions found in a page.
 - **Safe by default.** An unknown shop is refused. A guard that cannot decide says "ask", never "allow". Money is whole cents. The ledger cannot be edited (database triggers). One live order per request is enforced by the database.
-- **Gifts.** A request can be a goal instead of an item. The agent suggests up to three gifts with reasons, every hard rule still applies, and the guard always asks you to choose.
-- **Aftercare.** The app finds a price drop inside a shop's price-protection window or a wrong item, collects an evidence pack (the listing as saved with a fingerprint, the order, the delivery record, the shop's policy, a timeline), and refunds a price drop automatically, without a button, because a price on a shop's page is a fact the code can check. A delivery problem is different: when an order is delivered the app asks you, in neutral words, to confirm it arrived as ordered. Only you know what arrived, so a refund follows only if you report a problem and the shop's own delivery record agrees. The amount is worked out again at that moment and can never exceed what is left of the payment. If an automatic refund fails it is tried again a few times, then left for you to press the button, and a notification tells you what happened either way. (`AUTO_REFUND=0` turns automatic refunds off.)
+- **Gifts.** The agent and the API also accept a request that is a goal instead of an item. The agent then suggests up to three gifts with reasons, every hard rule still applies, and the guard always asks you to choose. The new-request screen currently offers a single item only.
+- **Aftercare.** After a purchase the app keeps checking the shop's price. If the shop lowers it inside its price-protection window (14 days in the demo shops), the difference is refunded automatically, without a button, because a price on a shop's page is a fact the code can check. The refund can never exceed what is left of the payment. If an automatic refund fails it is tried again a few times, then left for you to press the button, and a notification tells you what happened either way (`AUTO_REFUND=0` turns automatic refunds off). When an order is delivered, the app asks you, in neutral words, to confirm it arrived as ordered. A refund for a delivery problem follows only if you report a problem and the shop's own delivery record agrees.
 - **Live view.** The *Playground* shows your agent walking between shops, the guard and PayPal as it works. The public *Town square* shows every shopper anonymously: no typed text and no guard reasons are shown, and your own agents carry a "You" label for you alone.
-- **Abuse limits for a public demo.** Per-address and per-account daily limits on runs, sign-ups and purchases, a cap on concurrent runs, a daily model budget counted before each run starts, a token cap per run, and a kill switch.
 
 ## Tools used
 
-- **PayPal** sandbox APIs: Vault (saved buyer, including "connect your own sandbox account"), Orders (authorize, capture), Payouts, Payments refunds, Webhooks (signature verification).
+- **PayPal** sandbox APIs: Vault (saved buyer, including "Use my own sandbox account", where the person signs in on PayPal's own page), Orders (authorize, capture), Payouts, Payments refunds, Webhooks (signature verification; not yet connected on the live site).
 - **Claude Haiku 5.5** (`claude-haiku-5-5`) through the Anthropic SDK, with strict tool use. It is the shopper and the writer of case messages. It never decides money.
-- **AG Grid** for the ledger table on the Wallet page.
-- **Render** to host it (see below), and Postgres for state.
-- Hono, React, Vite, TypeScript (Node 24 type stripping), `node:test`.
+- **Sponsor tools:** **Render** hosts the app and its Postgres database (see below), and **AG Grid** draws the ledger table on the Wallet page. No other sponsor tool is used.
+- Hono, React, Vite, TypeScript (Node 24 type stripping), Server-Sent Events for the live map, `node:test`.
 
 ## Run it yourself (no keys, no cost)
 
@@ -64,12 +62,12 @@ Open http://localhost:3000 and press **Try the demo**. **Mock mode** uses a scri
 
 ### With the real Claude model and the PayPal sandbox
 
-Add `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `VAULT_ID` (or `DEMO_VAULT_ID`) and `SHOP_PAYEE_EMAIL` to `.env` (`.env.example` says where each comes from), then `npm run app`. A real run costs about 0.2 to 2 US cents of Anthropic usage and buys nothing until you approve; the scripts in `scripts/` that spend money say so at the top.
+Add `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `VAULT_ID` (or `DEMO_VAULT_ID`) and `SHOP_PAYEE_EMAIL` to `.env` (`.env.example` says where each comes from), then `npm run app`. A real run uses a little Anthropic credit (an early estimate was 0.2 to 2 US cents; it has not been re-measured) and, if the shopper buys something, a payment in the PayPal sandbox. The scripts in `scripts/` that spend money say so at the top.
 
 ## Tests
 
 ```bash
-npm test            # 235 tests, about 5 seconds, no keys and no cost (needs the local Postgres)
+npm test            # 308 tests, about 15 seconds, no keys and no cost (needs the local Postgres)
 npm run typecheck && npm run web:typecheck
 ```
 
@@ -77,22 +75,13 @@ The model is scripted in tests, so they check everything around it: the tools, t
 
 ## Deploy on Render
 
-`render.yaml` is a Blueprint: one web service (the app, which also serves the three simulated shops at `/shops/<name>` and the owner's control panel at `/control`) and a Postgres database. That is about $13 a month, as Render's pricing page showed on 2026-11-11. It starts in **mock mode** so deploying and testing in the cloud costs no model or PayPal money. After it is up, `scripts/cloud-check.ts` tests the live address (reachability, the live stream through Render's proxy, which address the app sees, and a full purchase and refund in mock mode):
+`render.yaml` is a Blueprint: one web service (the app, which also serves the three simulated shops at `/shops/<name>` and the owner's control panel at `/control`) and a Postgres database. That is about $13 a month, as Render's pricing page showed on 2026-11-11. The Blueprint no longer sets `MOCK_SERVICES`, so the app starts in **real mode** and needs the keys listed below. To deploy and test in the cloud at no model or PayPal cost, add `MOCK_SERVICES=1` in the dashboard (a scripted shopper and a pretend PayPal). After it is up, `scripts/cloud-check.ts` tests the live address (reachability, the live stream through Render's proxy, which address the app sees, and, in mock mode only, a full purchase and refund):
 
 ```bash
 DIAG_TOKEN=... CONTROL_TOKEN=... node scripts/cloud-check.ts https://<app>.onrender.com
 ```
 
-**Going live** is adding settings in the Render dashboard (the app's Environment tab), then redeploying: `MOCK_SERVICES` removed, plus `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `DEMO_VAULT_ID`, `SHOP_PAYEE_EMAIL`, and `PAYPAL_WEBHOOK_ID` once a webhook pointing at `https://<app>/api/paypal/webhook` exists in the PayPal developer dashboard. `TRUSTED_PROXY_HOPS` is set to 2 in `render.yaml`, which is what the cloud check measured on Render (the header arrives as the visitor's address followed by a Cloudflare address). Re-run the check if you move hosts, or every visitor could share one daily limit.
-
-## Known limits and things not yet verified
-
-- The shops are simulated. Prices are invented and do not match real-world prices.
-- Shop search matches whole words only: "flashlight" does not find the headlamp.
-- Verified in the sandbox: the charge, payout and a partial refund (checked through PayPal's API). **Not verified:** webhooks (they need a public https address), the fields inside PayPal's dispute events, a refund while a dispute is open, and whether PayPal's refund webhook carries our case id. The code reads those events defensively.
-- A buyer cannot open a PayPal dispute through the API, so the app records disputes PayPal reports and supplies the evidence; it cannot file one.
-- Render's forwarded-address behaviour and its limits on long-lived streams are not in its documentation and are measured by `scripts/cloud-check.ts`.
-- The live (non-sandbox) PayPal environment would need PayPal's approval for vaulting and "Log in with PayPal". This project is a sandbox demo.
+**Going live** is adding settings in the Render dashboard (the app's Environment tab), then redeploying, with `MOCK_SERVICES` absent: `ANTHROPIC_API_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `DEMO_VAULT_ID`, `SHOP_PAYEE_EMAIL`, and `PAYPAL_WEBHOOK_ID` once a webhook pointing at `https://<app>/api/paypal/webhook` exists in the PayPal developer dashboard. `TRUSTED_PROXY_HOPS` is set to 2 in `render.yaml`, which is what the cloud check measured on Render (the header arrives as the visitor's address followed by a Cloudflare address). Re-run the check if you move hosts, or every visitor could share one daily limit. The demo's daily limits per address (`LIMIT_IP_SIGNUPS_PER_DAY`, default 5, and `LIMIT_IP_RUNS_PER_DAY`, default 10) are low on purpose; raise them while many people try it, and lower them again afterwards so the model budget cannot run away.
 
 ## Project layout
 
