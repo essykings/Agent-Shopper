@@ -3,12 +3,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { CaseRow, Me, RequestRow } from "./api";
+import type { CaseRow, Me, Notice, RequestRow } from "./api";
 import { badgeCount, needsYou, visibleNeeds } from "../../src/shared/needs.ts";
 import type { NeedItem, NeedsInput } from "../../src/shared/needs.ts";
 
 /** Pages dispatch this after they change something, so the bar updates straight away instead of at the next check. */
 export const CHANGED = "agent-shopper:changed";
+
+// While a run is still playing on the map, nothing about its result is announced: not the top message, not the tab count.
+// The map trails the real run a little (it shows each step a moment apart), and a result that arrives first gives the ending away.
+let held = false;
+export function holdUpdates(on: boolean): void {
+  const was = held;
+  held = on;
+  if (was && !on) window.dispatchEvent(new Event(CHANGED));
+}
 
 const POLL_MS = 20_000;
 const CHECK_MS = 180_000;
@@ -28,18 +37,25 @@ function toRequests(list: RequestRow[]): NeedsInput["requests"] {
   }));
 }
 
-export function useNeeds(me: Me | null): { items: NeedItem[]; badge: number } {
+export function useNeeds(me: Me | null): { items: NeedItem[]; badge: number; unread: number } {
   const [requests, setRequests] = useState<RequestRow[]>([]);
   const [cases, setCases] = useState<CaseRow[]>([]);
+  const [notices, setNotices] = useState<{ items: Notice[]; unread: number }>({ items: [], unread: 0 });
   const latest = useRef<RequestRow[]>([]);
   const signedIn = me !== null;
 
   const reload = useCallback(async () => {
     try {
-      const [r, c] = await Promise.all([api<{ requests: RequestRow[] }>("GET", "/api/requests"), api<{ cases: CaseRow[] }>("GET", "/api/cases")]);
+      const [r, c, n] = await Promise.all([
+        api<{ requests: RequestRow[] }>("GET", "/api/requests"),
+        api<{ cases: CaseRow[] }>("GET", "/api/cases"),
+        api<{ items: Notice[]; unread: number }>("GET", "/api/notifications"),
+      ]);
       latest.current = r.requests;
+      if (held) return; // looked at, but shown only once the map has finished
       setRequests(r.requests);
       setCases(c.cases);
+      setNotices(n);
     } catch {
       // Keep what is shown. The next check tries again.
     }
@@ -90,9 +106,11 @@ export function useNeeds(me: Me | null): { items: NeedItem[]; badge: number } {
     paused: me?.paused ?? false,
     paymentSource: me?.payment.source ?? "demo",
     requests: toRequests(requests),
-    cases: cases.map((c) => ({ id: c.id, orderId: c.orderId, kind: c.kind, status: c.status, amountCents: c.amountCents, itemName: c.itemName, shopName: c.shopName })),
+    cases: cases.map((c) => ({ id: c.id, orderId: c.orderId, kind: c.kind, status: c.status, amountCents: c.amountCents, itemName: c.itemName, shopName: c.shopName, failure: c.failure })),
+    notices: notices.items.filter((n) => !n.read).map((n) => ({ id: n.id, kind: n.kind, text: n.text })),
+    autoRefund: me?.autoRefund ?? false,
   });
-  return { items, badge: badgeCount(items) };
+  return { items, badge: badgeCount(items), unread: notices.unread };
 }
 
 /** One line under the menu: the most important thing waiting, with one button. */

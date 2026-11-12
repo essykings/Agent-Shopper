@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import type { Me, RequestRow, RunResult } from "./api";
 import { RunPanel, summarize } from "./Home";
+import { holdUpdates } from "./needs";
 import { Busy, Intro, Note, letter, useLoad } from "./ui";
 import type { Feed } from "../../src/shared/events.ts";
 import { Player, shopName } from "../../src/shared/world.ts";
@@ -241,6 +242,12 @@ export function Playground({ me, refreshMe }: { me: Me; refreshMe: () => void })
   const open = (requests.data?.requests ?? []).filter((r) => r.status === "active" && !r.order);
   const [picked, setPicked] = useState("");
   const [running, setRunning] = useState(false);
+  // Nothing about a run is announced elsewhere until the map has finished playing it.
+  useEffect(() => {
+    if (!running && idle) holdUpdates(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, idle]);
+  useEffect(() => () => holdUpdates(false), []);
   const [result, setResult] = useState<{ id: string; run: RunResult } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const chosen = open.find((r) => r.id === picked) ?? open[0];
@@ -248,6 +255,7 @@ export function Playground({ me, refreshMe }: { me: Me; refreshMe: () => void })
 
   async function run() {
     if (!chosen) return;
+    holdUpdates(true);
     setRunning(true);
     setError(null);
     setResult(null);
@@ -322,8 +330,7 @@ export function Playground({ me, refreshMe }: { me: Me; refreshMe: () => void })
 }
 
 /** Your own shopper on the map, for the Home page: live while it works, waiting when it does not. */
-export function MyShopper() {
-  const { world } = useLive("/api/live");
+export function MyShopper({ world }: { world: World }) {
   const today = useTodayCounts();
   const doing = world.log.at(-1)?.text;
   return (

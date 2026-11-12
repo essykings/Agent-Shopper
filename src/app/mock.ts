@@ -5,7 +5,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ModelPort } from "../agent/shopper.ts";
 import { SHOPS, searchProducts, searchShop } from "../shops/catalog.ts";
-import { searchLadder } from "../shared/words.ts";
+import { headNoun, keywords, searchLadder } from "../shared/words.ts";
 
 type Params = Anthropic.MessageCreateParamsNonStreaming;
 type Block = Record<string, unknown>;
@@ -161,8 +161,13 @@ export function createMockModel(opts: { delayMs?: number } = {}): ModelPort {
       });
     const hitAt = tried.find((q) => !q.startsWith("dept:") && listingsFor(q).length > 0);
 
-    // Listings from that search (the same one the shops offer), cheapest first.
-    const candidates = (hitAt === undefined ? [] : listingsFor(hitAt)).sort(
+    // Listings from that search (the same one the shops offer), cheapest first. If some of them ARE the item (a laptop) and others
+    // only carry its name (a laptop sleeve, a laptop stand), only the real ones count, even when they are too dear: it gives up
+    // rather than buying an accessory. When none is clearly the item, every match counts, as before.
+    const found = hitAt === undefined ? [] : listingsFor(hitAt);
+    const wanted = new Set(keywords(item));
+    const itself = found.filter(({ product }) => wanted.has(headNoun(product.name)));
+    const candidates = (itself.length > 0 ? itself : found).sort(
       (a, b) => a.product.priceCents + a.product.shippingCents - (b.product.priceCents + b.product.shippingCents),
     );
 

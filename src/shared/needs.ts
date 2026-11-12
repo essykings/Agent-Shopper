@@ -1,7 +1,7 @@
 // What is waiting for the owner right now, worked out from what the app already knows. No screen code
 // here, so every state can be tested without a browser. The "Needs you" bar and the tab title use it.
 
-export type NeedKind = "payment" | "paused" | "ideas" | "approval" | "refund" | "ready";
+export type NeedKind = "payment" | "paused" | "ideas" | "approval" | "refund" | "notice";
 export type NeedTone = "plain" | "ok" | "warn" | "bad";
 export type NeedAction = { label: string; href: string } | { label: string; run: "resume" };
 
@@ -36,6 +36,15 @@ export interface NeedsCase {
   amountCents: number;
   itemName: string;
   shopName: string;
+  /** Why an automatic refund did not go through, if it was tried and failed. */
+  failure: string | null;
+}
+
+/** Something the owner has not read yet: what was bought, what was refunded, what went wrong. */
+export interface NeedsNotice {
+  id: string;
+  kind: string;
+  text: string;
 }
 
 export interface NeedsInput {
@@ -43,6 +52,10 @@ export interface NeedsInput {
   paymentSource: "demo" | "own" | "none";
   requests: NeedsRequest[];
   cases: NeedsCase[];
+  /** Unread notices, newest first. */
+  notices: NeedsNotice[];
+  /** Refunds are made automatically, so an open case is only worth the owner's attention once an automatic refund has failed. */
+  autoRefund: boolean;
 }
 
 const money = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
@@ -85,6 +98,7 @@ export function needsYou(input: NeedsInput): NeedItem[] {
   const byOrder = new Map<string, NeedsCase>();
   for (const c of input.cases) {
     if (c.status !== "open" || (c.kind !== "price_drop" && c.kind !== "wrong_item")) continue;
+    if (input.autoRefund && c.kind === "price_drop" && c.failure === null) continue; // on its way: the app is refunding it
     const best = byOrder.get(c.orderId);
     if (!best || c.amountCents > best.amountCents) byOrder.set(c.orderId, c);
   }
@@ -92,27 +106,36 @@ export function needsYou(input: NeedsInput): NeedItem[] {
     items.push({
       id: `refund:${c.id}`,
       kind: "refund",
-      tone: "ok",
+      tone: input.autoRefund || c.kind === "wrong_item" ? "warn" : "ok",
       text:
-        c.kind === "price_drop"
-          ? `${c.shopName} dropped its price on ${c.itemName}. You can claim ${money(c.amountCents)}.`
-          : `${c.shopName} sent the wrong item for ${c.itemName}. You can claim ${money(c.amountCents)}.`,
-      action: { label: "Review the refund", href: "#/orders" },
+        c.kind === "wrong_item"
+          ? `Please check your ${c.itemName} from ${c.shopName}. The shop's delivery record shows something different from what you ordered. Did you receive something different?`
+          : input.autoRefund
+            ? `We could not refund ${money(c.amountCents)} for ${c.itemName} from ${c.shopName} automatically. You can refund it yourself.`
+            : `${c.shopName} dropped its price on ${c.itemName}. You can claim ${money(c.amountCents)}.`,
+      action: { label: c.kind === "wrong_item" ? "Check your order" : input.autoRefund ? "Open Orders" : "Review the refund", href: "#/orders" },
     });
   }
 
-  const idle = open.filter((r) => r.ideas === 0 && !r.approval);
-  if (idle.length === 1) {
-    items.push({ id: `ready:${idle[0]!.id}`, kind: "ready", tone: "plain", text: `Not bought yet: ${idle[0]!.item}.`, action: { label: "Search again", href: "#/" } });
-  } else if (idle.length > 1) {
-    items.push({ id: "ready", kind: "ready", tone: "plain", text: `${idle.length} requests are not bought yet.`, action: { label: "Go to my requests", href: "#/" } });
+  // The newest thing the owner has not read yet. Opening notifications marks everything read.
+  const latest = input.notices[0];
+  if (latest) {
+    items.push({
+      id: `notice:${latest.id}`,
+      kind: "notice",
+      tone: latest.kind === "refund_failed" ? "warn" : latest.kind === "refunded" ? "ok" : "plain",
+      text: latest.text,
+      ...(input.notices.length > 1 ? { sub: `${input.notices.length - 1} more ${input.notices.length === 2 ? "notification" : "notifications"} waiting` } : {}),
+      action: { label: "Open notifications", href: "#/notifications" },
+    });
   }
+
   return items;
 }
 
-/** How many things need the owner's decision. Not counting a request that has not been bought yet. */
+/** How many things need the owner's attention: decisions, problems and unread notices. */
 export function badgeCount(items: NeedItem[]): number {
-  return items.filter((i) => i.kind !== "ready").length;
+  return items.length;
 }
 
 /** What to show on the page the owner is looking at: nothing that points at the page they are already on. */

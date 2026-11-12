@@ -1,13 +1,14 @@
 // Aftercare: what happens once an order is paid. Plain code, like the guard.
 //
-//   find a problem  ->  build the evidence  ->  work out the refund  ->  the owner presses the button
-//   ->  PayPal refunds  ->  the ledger records it
+//   find a problem  ->  build the evidence  ->  work out the refund  ->  PayPal refunds  ->  the ledger records it
+//   (a price drop is refunded automatically by aftercare-auto.ts. A wrong item waits for the owner to say it is what arrived,
+//    because only the owner knows. The owner can also press the button if an automatic refund fails.)
 //
 // Rules of the house:
 //  - Code decides whether a refund is owed and how much. A model only writes words for a person
 //    to read (the draft message), and a screen can only press "yes", never name an amount.
-//  - Nothing is refunded until the owner presses the button, and the amount is worked out again
-//    at that moment from the shop's current price, as the purchase guard does.
+//  - The amount is worked out again at the moment of refunding from the shop's current price, as the
+//    purchase guard does, whether the refund is automatic or a person pressed the button.
 //  - A refund can never be more than is left of what was paid. The database enforces it too.
 //  - A refund is safe to repeat: the same case always sends the same PayPal request id.
 
@@ -18,6 +19,7 @@ import { findProduct, findShop } from "../shops/catalog.ts";
 import { money } from "../shops/pages.ts";
 import type { Pool } from "./db.ts";
 import { appendLedger } from "./ledger.ts";
+import { notify } from "./notifications.ts";
 import type { PayPalPort } from "./paypal-port.ts";
 
 /** A price drop smaller than this is not worth a refund. */
@@ -64,7 +66,7 @@ export function planWrongItem(i: { paidCents: number; refundedCents: number; sho
   if (i.shippedItem === null) return { eligible: false, amountCents: 0, reason: "The shop's delivery record matches what was listed." };
   if (i.shopStatus !== "shipped" && i.shopStatus !== "delivered") return { eligible: false, amountCents: 0, reason: "The shop has not shipped it yet." };
   if (left <= 0) return { eligible: false, amountCents: 0, reason: "Nothing is left to refund on this order." };
-  return { eligible: true, amountCents: left, reason: `You ordered "${i.listedName}" but the shop's delivery record says it sent "${i.shippedItem}".` };
+  return { eligible: true, amountCents: left, reason: `The shop's delivery record shows "${i.shippedItem}" for your order of "${i.listedName}".` };
 }
 
 // ---------- reading what happened ----------
@@ -84,19 +86,21 @@ export interface OrderFacts {
   shopStatus: string | null;
   shippedItem: string | null;
   promisedBy: string | null;
+  /** A price cut the shop gave this order only (percent). */
+  priceCutPct: number;
 }
 
 const ORDER_SQL = `
   select o.id, o.user_id, o.mandate_id, o.shop_id, o.proposal_id, o.total_cents, o.refunded_cents, o.status,
          o.paypal_capture_id, o.created_at, so.item_key, so.status as shop_status, so.shipped_item,
-         to_char(so.promised_by, 'YYYY-MM-DD') as promised_by
+         to_char(so.promised_by, 'YYYY-MM-DD') as promised_by, coalesce(so.price_cut_pct, 0) as price_cut_pct
   from orders o left join shop_orders so on so.order_id = o.id`;
 
 function toFacts(r: Record<string, any>): OrderFacts {
   return {
     orderId: r.id, userId: r.user_id, mandateId: r.mandate_id, shopId: r.shop_id, proposalId: r.proposal_id, totalCents: r.total_cents,
     refundedCents: r.refunded_cents, status: r.status, captureId: r.paypal_capture_id, createdAt: r.created_at, itemKey: r.item_key,
-    shopStatus: r.shop_status, shippedItem: r.shipped_item, promisedBy: r.promised_by,
+    shopStatus: r.shop_status, shippedItem: r.shipped_item, promisedBy: r.promised_by, priceCutPct: r.price_cut_pct,
   };
 }
 
@@ -111,12 +115,13 @@ const itemNameOf = (shopId: string, key: string | null): string => {
   return (shop && key && findProduct(shop, key)?.name) || key || "the item";
 };
 
-/** The price the shop shows for this item right now, shipping included. Null if it cannot be read. */
+/** The price the shop shows for this item right now, shipping included, less any cut the shop gave this order. Null if it cannot be read. */
 async function currentTotal(deps: AftercareDeps, o: OrderFacts): Promise<number | null> {
   const ref = deps.shops.find((s) => s.id === o.shopId);
   if (!ref || !o.itemKey) return null;
   try {
-    return parseProduct(await deps.fetchPage(`${ref.baseUrl}/products/${o.itemKey}`))?.totalCents ?? null;
+    const shown = parseProduct(await deps.fetchPage(`${ref.baseUrl}/products/${o.itemKey}`))?.totalCents ?? null;
+    return shown === null ? null : Math.round((shown * (100 - o.priceCutPct)) / 100);
   } catch {
     return null;
   }
@@ -143,7 +148,7 @@ export async function buildEvidence(pool: Pool, o: OrderFacts, claim: { kind: Ca
   ).rows.map((r) => ({ at: r.at, event: r.kind, amountCents: Number(r.amount_cents) }));
   return {
     claim,
-    order: { id: o.orderId, shop: shop?.name ?? o.shopId, item: itemNameOf(o.shopId, o.itemKey), paidCents: o.totalCents, refundedCents: o.refundedCents, orderedAt: o.createdAt, promisedBy: o.promisedBy, shopStatus: o.shopStatus },
+    order: { id: o.orderId, shop: shop?.name ?? o.shopId, item: itemNameOf(o.shopId, o.itemKey), paidCents: o.totalCents, refundedCents: o.refundedCents, orderedAt: o.createdAt, promisedBy: o.promisedBy, shopStatus: o.shopStatus, ...(o.priceCutPct > 0 ? { priceCutPct: o.priceCutPct } : {}) },
     listing: listing
       ? { page: listing.url, savedAt: listing.fetched_at, fingerprint: listing.fingerprint, name: parsed?.name ?? null, condition: parsed?.condition ?? null, totalCents: parsed?.totalCents ?? null }
       : null,
@@ -191,13 +196,25 @@ async function openOrUpdateCase(pool: Pool, o: OrderFacts, kind: CaseKind, plan:
   const evidence = await buildEvidence(pool, o, { kind, amountCents: plan.amountCents, reason: plan.reason });
   if (plan.eligible) {
     // A new case, or the amount on a case still waiting is brought up to date. A finished case is left alone.
-    await pool.query(
+    const saved = await pool.query<{ id: string; inserted: boolean }>(
       `insert into cases (user_id, order_id, kind, amount_cents, summary, evidence) values ($1, $2, $3, $4, $5, $6)
        on conflict (order_id, kind) where kind <> 'dispute'
        do update set amount_cents = excluded.amount_cents, summary = excluded.summary, evidence = excluded.evidence, updated_at = now()
-       where cases.status = 'open'`,
+       where cases.status = 'open'
+       returning id, (xmax = 0) as inserted`,
       [o.userId, o.orderId, kind, plan.amountCents, plan.reason, JSON.stringify(evidence)],
     );
+    // A wrong item is the owner's to confirm: only they know what arrived. So, once, they are asked.
+    const row = saved.rows[0];
+    if (kind === "wrong_item" && row?.inserted && o.shippedItem) {
+      await notify(pool, {
+        userId: o.userId,
+        kind: "question",
+        text: `Please check your ${itemNameOf(o.shopId, o.itemKey)} from ${findShop(o.shopId)?.name ?? "the shop"}: the shop's delivery record lists "${o.shippedItem}" instead. Did you receive something different? If so, you can be refunded ${money(plan.amountCents)}.`,
+        href: "#/orders",
+        key: `case:${row.id}:question`,
+      });
+    }
   } else {
     // The reason has gone (the price went back up): a case still waiting can no longer be acted on.
     await pool.query(
@@ -268,7 +285,7 @@ export async function refundCase(pool: Pool, deps: AftercareDeps, input: { userI
         captureId: o.captureId,
         amountCents: plan.amountCents,
         requestId: `refund-${c.id}`,
-        note: `${c.kind === "wrong_item" ? "Wrong item" : "Price drop"} refund for ${itemNameOf(o.shopId, o.itemKey)}`,
+        note: c.kind === "wrong_item" ? `Refund: the item did not match the order (${itemNameOf(o.shopId, o.itemKey)})` : `Price drop refund for ${itemNameOf(o.shopId, o.itemKey)}`,
         customId: c.id,
       });
     } catch (err) {

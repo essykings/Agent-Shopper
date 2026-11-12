@@ -19,12 +19,14 @@ export interface ShopOrderRow {
   status: "received" | "shipped" | "delivered";
   /** What was really in the box when it was not what was listed. */
   shippedItem: string | null;
+  /** A price cut the shop gave this order only, as a percent (the demo's scripted price drop). 0 when none. */
+  priceCutPct: number;
 }
 
-const COLUMNS = "order_id, shop_id, item_key, to_char(promised_by, 'YYYY-MM-DD') as promised_by, status, shipped_item";
+const COLUMNS = "order_id, shop_id, item_key, to_char(promised_by, 'YYYY-MM-DD') as promised_by, status, shipped_item, price_cut_pct";
 
 function toRow(r: Record<string, any>): ShopOrderRow {
-  return { orderId: r.order_id, shopId: r.shop_id, itemKey: r.item_key, promisedBy: r.promised_by, status: r.status, shippedItem: r.shipped_item };
+  return { orderId: r.order_id, shopId: r.shop_id, itemKey: r.item_key, promisedBy: r.promised_by, status: r.status, shippedItem: r.shipped_item, priceCutPct: r.price_cut_pct };
 }
 
 const isoDate = (d: Date): string => d.toISOString().slice(0, 10);

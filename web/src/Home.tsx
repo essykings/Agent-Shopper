@@ -1,12 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api, money } from "./api";
 import type { Me, RequestRow, RunResult } from "./api";
-import { MyShopper } from "./Town";
-import { CHANGED } from "./needs";
+import { MyShopper, useLive } from "./Town";
+import type { NewPrefill } from "./NewRequest";
+import { giveUpBody } from "../../src/shared/messages.ts";
+import { CHANGED, holdUpdates } from "./needs";
 import { Busy, Intro, Note, Pill, letter, useLoad } from "./ui";
 import type { CaseRow } from "./api";
 
-export function summarize(r: RunResult): { tone: "ok" | "warn" | "err"; text: string } {
+type GaveUp = { reason?: string; tried?: string[]; closest?: { itemName: string; shopId: string; totalCents: number } | null };
+
+/** What to say when the shopper decided there was nothing to buy. The reason is the shopper's own short summary. */
+export function giveUpMessage(o: GaveUp): { text: string; detail?: string } {
+  const tried = (o.tried ?? []).map((q) => (q.startsWith("the ") ? q : `"${q}"`));
+  const list = tried.length > 1 ? `${tried.slice(0, -1).join(", ")} and ${tried.at(-1)}` : tried.join("");
+  return {
+    text: `Nothing was bought. ${giveUpBody(o)}`.trim(),
+    ...(list ? { detail: `Searched for ${list}.` } : {}),
+  };
+}
+
+/** A limit that would buy the closest option, rounded up to a whole $5. */
+export const raisedLimitCents = (closestCents: number): number => Math.ceil(closestCents / 500) * 500;
+
+export function summarize(r: RunResult): { tone: "ok" | "warn" | "err"; text: string; detail?: string } {
   if (r.stage === "shortlist") {
     const n = r.picks?.length ?? 0;
     return { tone: "warn", text: `Found ${n} gift idea${n === 1 ? "" : "s"}. Nothing is charged until you choose one.` };
@@ -14,11 +31,7 @@ export function summarize(r: RunResult): { tone: "ok" | "warn" | "err"; text: st
   if (r.stage === "owner") return { tone: "warn", text: `Found it for ${money(r.totalCents ?? 0)}. Nothing is charged until you approve.` };
   if (r.stage === "agent") {
     const o = r.outcome ?? { status: "" };
-    if (o.status === "gave_up") {
-      const tried = (o.tried ?? []).map((q) => (q.startsWith("the ") ? q : `"${q}"`));
-      const list = tried.length > 1 ? `${tried.slice(0, -1).join(", ")} and ${tried.at(-1)}` : tried.join("");
-      return { tone: "warn", text: `Nothing fit your rules. ${o.reason ?? ""}${list ? ` It searched for ${list} in the shops.` : ""} Try a simpler name and press Search again.` };
-    }
+    if (o.status === "gave_up") return { tone: "warn", ...giveUpMessage(o) };
     if (o.status === "refused") return { tone: "err", text: "The shopper declined this request." };
     if (o.status === "time_limit") return { tone: "warn", text: "The shopper ran out of time before deciding. Nothing was bought. Try again in a moment." };
     if (o.status === "step_limit" || o.status === "token_limit") return { tone: "warn", text: "The shopper ran out of effort before deciding. Nothing was bought." };
@@ -31,7 +44,7 @@ export function summarize(r: RunResult): { tone: "ok" | "warn" | "err"; text: st
     case "payout_failed": return { tone: "warn", text: "You were charged, but paying the shop failed. It can be retried." };
     case "denied": return { tone: "err", text: `Not allowed: ${(p.checks ?? []).filter((c) => c.level === "deny").map((c) => c.detail).join(" ")}` };
     case "cancelled": return { tone: "warn", text: `Stopped at the last check, so nothing was charged. ${p.reason ?? ""}` };
-    case "failed": return { tone: "err", text: `PayPal could not complete it. Nothing was charged. ${p.reason ?? ""}` };
+    case "failed": return { tone: "err", text: /fetch failed|no answer|ECONN|ENOTFOUND|ETIMEDOUT|network/i.test(p.reason ?? "") ? "PayPal could not be reached just now. Nothing was charged. Try again in a moment." : `PayPal could not complete it. Nothing was charged. ${p.reason ?? ""}`.trim() };
     case "duplicate": return { tone: "warn", text: "That request already has an order." };
     default: return { tone: "warn", text: "Needs your OK before anything is charged." };
   }
@@ -42,6 +55,7 @@ export function RunPanel({ run }: { run: RunResult }) {
   return (
     <div style={{ flexBasis: "100%" }}>
       <Note tone={s.tone}>{s.text}</Note>
+      {s.detail && <p className="s" style={{ margin: "6px 0 0" }}>{s.detail}</p>}
       <ul className="steps">
         {run.actions.map((a, i) => (
           <li key={i}>{a.ok ? "✓" : "✗"} {a.summary}</li>
@@ -54,16 +68,22 @@ export function RunPanel({ run }: { run: RunResult }) {
   );
 }
 
-export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; refreshMe: () => void; onNew: () => void; startId?: string | null; onStarted?: () => void }) {
+export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; refreshMe: () => void; onNew: (prefill?: NewPrefill) => void; startId?: string | null; onStarted?: () => void }) {
   const requests = useLoad(() => api<{ requests: RequestRow[] }>("GET", "/api/requests"));
   const cases = useLoad(() => api<{ cases: CaseRow[] }>("GET", "/api/cases"));
-  const [running, setRunning] = useState<string | null>(null);
   const [runs, setRuns] = useState<Record<string, RunResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const live = useLive("/api/live");
+  // Several requests can be out at once. A run is "going" until the server answers, then "settling" until the map has finished
+  // showing it: until then the request still says it is searching, and the result, the balances and the messages at the top wait,
+  // so what you read matches what you see.
+  const [going, setGoing] = useState<Set<string>>(new Set());
+  const [settling, setSettling] = useState<Set<string>>(new Set());
   const b = me.balances;
 
   async function run(id: string) {
-    setRunning(id);
+    holdUpdates(true);
+    setGoing((g) => new Set(g).add(id));
     setErrors((e) => ({ ...e, [id]: "" }));
     try {
       const r = await api<RunResult>("POST", `/api/requests/${id}/run`, {});
@@ -71,11 +91,23 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
     } catch (err) {
       setErrors((e) => ({ ...e, [id]: err instanceof ApiError ? err.message : "Something went wrong." }));
     }
-    setRunning(null);
+    setGoing((g) => {
+      const next = new Set(g);
+      next.delete(id);
+      return next;
+    });
+    setSettling((x) => new Set(x).add(id));
+  }
+
+  useEffect(() => {
+    if (settling.size === 0 || !live.idle) return;
+    setSettling(new Set());
     requests.reload();
     refreshMe();
-    window.dispatchEvent(new Event(CHANGED));
-  }
+    if (going.size === 0) holdUpdates(false); // tells the top message and the tab count to look again
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settling, live.idle]);
+  useEffect(() => () => holdUpdates(false), []);
 
   // A request that was just created starts looking straight away. Nobody presses Run.
   const started = useRef<string | null>(null);
@@ -83,9 +115,24 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
     if (!startId || started.current === startId) return;
     started.current = startId;
     onStarted?.();
+    requests.reload();
     void run(startId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startId]);
+
+  // A request the server is still working on (from before this page was opened) is checked every few seconds until it is done.
+  const list = requests.data?.requests ?? [];
+  const serverBusy = list.some((r) => r.working && !going.has(r.id) && !settling.has(r.id));
+  useEffect(() => {
+    if (!serverBusy) return;
+    const t = window.setInterval(() => {
+      requests.reload();
+      refreshMe();
+      window.dispatchEvent(new Event(CHANGED));
+    }, 3000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverBusy]);
 
   async function cancel(id: string) {
     try {
@@ -98,7 +145,6 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
     window.dispatchEvent(new Event(CHANGED));
   }
 
-  const list = requests.data?.requests ?? [];
   return (
     <>
       <div className="band">
@@ -118,7 +164,7 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
                 <div><div className="fig">{money(b.monthSpentCents)}</div><div className="lab" style={{ marginTop: 6 }}>Spent</div></div>
               </div>
               <div className="row" style={{ marginTop: 20 }}>
-                <button className="btn" onClick={onNew}>New request</button>
+                <button className="btn" onClick={() => onNew()}>New request</button>
                 <a className="btn2" href="#/wallet">Wallet</a>
               </div>
             </div>
@@ -133,11 +179,11 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
               <Note tone="warn">No PayPal account is connected, so your shopper can look but not buy. <a href="#/wallet"><b>Connect one on the Wallet page</b></a></Note>
             </div>
           )}
-          <div style={{ marginBottom: 32 }}><MyShopper /></div>
+          <div style={{ marginBottom: 32 }}><MyShopper world={live.world} /></div>
           <section className="card">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <h2 className="h2">Your requests</h2>
-              <button className="btn sm" onClick={onNew}>New request</button>
+              <button className="btn sm" onClick={() => onNew()}>New request</button>
             </div>
             {requests.error && <Note tone="err">{requests.error}</Note>}
             {!requests.error && requests.data && list.length === 0 && (
@@ -149,18 +195,25 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
                 const approval = r.kind === "item" && r.proposal?.decision === "ask" ? r.proposal : null;
                 const open = r.status === "active" && !r.order;
                 const waiting = open && (ideas > 0 || approval !== null);
-                const busy = running === r.id;
+                const busy = going.has(r.id) || settling.has(r.id) || r.working;
+                const closed = r.status === "expired" && r.closedOutcome;
+                const closedText = closed && !runs[r.id] ? giveUpMessage(r.closedOutcome!) : null;
+                const raise = closed && r.closedOutcome!.closest ? raisedLimitCents(r.closedOutcome!.closest.totalCents) : null;
                 const status =
                   r.status === "fulfilled" ? (
-                    <>Bought{r.order ? ` ${money(r.order.total_cents)}` : ""}. <a href="#/orders"><b>See the order</b></a></>
+                    <>Bought{r.order ? ` ${money(r.order.total_cents)} (limit ${money(r.maxPriceCents)})` : ""}. <a href="#/orders"><b>See the order</b></a></>
                   ) : r.status === "cancelled" ? (
                     "Cancelled. The money held for it is back in your allowance."
+                  ) : r.status === "expired" ? (
+                    closedText ? closedText.text : "Not bought. The money held for it is back in your allowance."
                   ) : waiting && ideas > 0 ? (
                     `Waiting for you: your shopper found ${ideas} gift idea${ideas === 1 ? "" : "s"}.`
                   ) : waiting && approval ? (
                     `Waiting for your OK: ${approval.itemName ?? approval.item_key} for ${money(approval.total_cents)} from ${approval.shopName ?? approval.shop_id}.`
+                  ) : busy ? (
+                    "Your shopper is on it."
                   ) : (
-                    busy ? "Your shopper is looking through the shops now." : "Not bought yet."
+                    "Not finished yet. Your shopper has not decided on this one."
                   );
                 return (
                   <div className="item" key={r.id}>
@@ -169,20 +222,28 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
                       <div className="t">{r.item}</div>
                       <div className="s">{r.kind === "gift" ? `Gift · ${r.goal?.interests ? `likes ${r.goal.interests} · ` : ""}` : ""}Will pay up to {money(r.maxPriceCents)}, shipping included</div>
                       <div className={waiting ? "t" : "s"} style={{ marginTop: 4 }}>{status}</div>
+                      {closedText?.detail && <div className="s">{closedText.detail}</div>}
                     </div>
                     {r.status === "fulfilled" && <Pill tone="ok">Bought</Pill>}
                     {r.status === "cancelled" && <Pill tone="bad">Cancelled</Pill>}
+                    {r.status === "expired" && <Pill tone="warn">Not bought</Pill>}
                     {waiting && <Pill tone="warn">Waiting for you</Pill>}
-                    {open && !waiting && <Pill tone="warn">{busy ? "Searching" : "Not bought yet"}</Pill>}
+                    {open && !waiting && <Pill tone="warn">{busy ? "Searching" : "Not finished"}</Pill>}
                     <div className="row" style={{ alignItems: "center" }}>
                       {waiting && <a className="btn sm" href={`#/approve/${r.id}`}>{ideas > 0 ? (ideas === 1 ? "See the idea" : `See the ${ideas} ideas`) : "Review and approve"}</a>}
                       {open && !waiting && (busy
                         ? <span className="s"><Busy>Searching…</Busy></span>
-                        : <button className="btn2 sm" disabled={me.paused || running !== null || me.payment.source === "none"} onClick={() => run(r.id)}>Search again</button>)}
+                        : <button className="btn2 sm" disabled={me.paused || me.payment.source === "none"} onClick={() => run(r.id)}>Search again</button>)}
                       {open && <button className="linkbtn" disabled={busy} onClick={() => cancel(r.id)}>Cancel request</button>}
                     </div>
                     {errors[r.id] && <div style={{ flexBasis: "100%" }}><Note tone="err">{errors[r.id]}</Note></div>}
-                    {runs[r.id] && <RunPanel run={runs[r.id]!} />}
+                    {runs[r.id] && !busy && <RunPanel run={runs[r.id]!} />}
+                    {closed && !busy && (
+                      <div className="row" style={{ flexBasis: "100%" }}>
+                        <button className="btn2 sm" onClick={() => onNew({ item: r.item, priceCents: r.maxPriceCents })}>Try again</button>
+                        {raise !== null && <button className="btn sm" onClick={() => onNew({ item: r.item, priceCents: raise })}>Raise my limit to {money(raise)} and search again</button>}
+                      </div>
+                    )}
                   </div>
                 );
               })}

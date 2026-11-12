@@ -52,7 +52,7 @@ export function createShopApp(pool: Pool, shop: ShopDef, opts: { now?: () => Dat
     const order = await getShopOrder(pool, id);
     const product = order && order.shopId === shop.id ? findProduct(shop, order.itemKey) : undefined;
     if (!order || !product) return c.html(renderNotFound(shop), 404);
-    return c.html(renderOrder(shop, { orderId: order.orderId, itemName: product.name, status: order.status, promisedBy: order.promisedBy }));
+    return c.html(renderOrder(shop, { orderId: order.orderId, itemName: product.name, status: order.status, promisedBy: order.promisedBy, priceCutPct: order.priceCutPct }));
   });
 
   app.notFound((c) => c.html(renderNotFound(shop), 404));

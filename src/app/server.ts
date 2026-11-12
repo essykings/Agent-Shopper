@@ -18,6 +18,8 @@ import { SHOPS } from "../shops/catalog.ts";
 import { createShopsApp, shopAddress } from "../shops/mount.ts";
 import { seedShops } from "../shops/service.ts";
 import { createApi } from "./api.ts";
+import type { AppDeps } from "./api.ts";
+import { runAftercareSweep } from "../server/aftercare-auto.ts";
 import { createMockModel } from "./mock.ts";
 
 const env = process.env;
@@ -64,7 +66,13 @@ if (mock) {
   model = (params, opts) => client.messages.create(params, opts?.signal ? { signal: opts.signal } : undefined);
 }
 
-const api = createApi(pool, {
+// Automatic aftercare. AUTO_REFUND=0 turns automatic refunds off (the owner then presses the button). DEMO_EVENT_SECONDS is how long
+// after a demo account's purchase the shop's scripted price drop or wrong item happens (0 turns the scripted events off).
+const autoRefund = env["AUTO_REFUND"]?.trim() !== "0";
+const demoEventSeconds = Number(env["DEMO_EVENT_SECONDS"] ?? 60);
+if (!Number.isFinite(demoEventSeconds) || demoEventSeconds < 0) fail("DEMO_EVENT_SECONDS must be a number of seconds, 0 or more.");
+
+const appDeps: AppDeps = {
   buy: {
     paypal: mock ? new FakePayPal() : createPayPalClient({ clientId: need("PAYPAL_CLIENT_ID"), clientSecret: need("PAYPAL_CLIENT_SECRET"), ...(env["PAYPAL_WEBHOOK_ID"]?.trim() ? { webhookId: env["PAYPAL_WEBHOOK_ID"].trim() } : {}) }),
     model,
@@ -86,7 +94,10 @@ const api = createApi(pool, {
   ...(env["DIAG_TOKEN"]?.trim() ? { diagToken: env["DIAG_TOKEN"].trim() } : {}),
   demoVaultId: env["DEMO_VAULT_ID"]?.trim() || env["VAULT_ID"]?.trim() || (mock ? "MOCK-VAULT" : need("DEMO_VAULT_ID")),
   mock,
-});
+  autoRefund,
+  demoEventSeconds,
+};
+const api = createApi(pool, appDeps);
 
 // Not strict about a trailing slash, so a shop's address works with or without one at the end.
 const app = new Hono({ strict: false });
@@ -103,6 +114,21 @@ if (existsSync("./web/dist/index.html")) {
 
 serve({ fetch: app.fetch, port });
 console.log(`Agent Shopper is open at http://localhost:${port}${mock ? "  (MOCK MODE: scripted shopper, pretend PayPal)" : ""}`);
+
+// Every 30 seconds: scripted demo events that are due, then every recent paid order is checked and, if a refund is owed, refunded.
+// It runs on the server, so it happens even when nobody has the app open. One pass at a time.
+if (autoRefund || demoEventSeconds > 0) {
+  let sweeping = false;
+  setInterval(() => {
+    if (sweeping) return;
+    sweeping = true;
+    void runAftercareSweep(pool, { paypal: appDeps.buy.paypal, fetchPage: appDeps.buy.fetchPage, shops }, { demoEventSeconds }, autoRefund)
+      .catch((err) => console.error(`Aftercare pass failed: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => {
+        sweeping = false;
+      });
+  }, 30_000).unref();
+}
 
 // Old usage records are only needed for the 24-hour limits.
 setInterval(() => void pruneAdmissions(pool).catch(() => undefined), 6 * 60 * 60 * 1000).unref();

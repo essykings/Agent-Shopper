@@ -30,7 +30,7 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Eve
 - **Prompt-injection defence.** Page text is untrusted. Hidden text aimed at AI readers is detected and lowers the shop's score, and the agent is told never to follow instructions found in a page.
 - **Safe by default.** An unknown shop is refused. A guard that cannot decide says "ask", never "allow". Money is whole cents. The ledger cannot be edited (database triggers). One live order per request is enforced by the database.
 - **Gifts.** A request can be a goal instead of an item. The agent suggests up to three gifts with reasons, every hard rule still applies, and the guard always asks you to choose.
-- **Aftercare.** The app finds a price drop inside a shop's price-protection window or a wrong item, collects an evidence pack (the listing as saved with a fingerprint, the order, the delivery record, the shop's policy, a timeline), has the shopper draft a message, and refunds only when you press the button. The amount is worked out again at that moment and can never exceed what is left of the payment.
+- **Aftercare.** The app finds a price drop inside a shop's price-protection window or a wrong item, collects an evidence pack (the listing as saved with a fingerprint, the order, the delivery record, the shop's policy, a timeline), and refunds a price drop automatically, without a button, because a price on a shop's page is a fact the code can check. A wrong item is different: only you know what arrived, so the app asks you to confirm before it refunds. The amount is worked out again at that moment and can never exceed what is left of the payment. If an automatic refund fails it is tried again a few times, then left for you to press the button, and a notification tells you what happened either way. (`AUTO_REFUND=0` turns automatic refunds off.)
 - **Live view.** The *Playground* shows your agent walking between shops, the guard and PayPal as it works. The public *Town square* shows every shopper anonymously: no typed text and no guard reasons are shown, and your own agents carry a "You" label for you alone.
 - **Abuse limits for a public demo.** Per-address and per-account daily limits on runs, sign-ups and purchases, a cap on concurrent runs, a daily model budget counted before each run starts, a token cap per run, and a kill switch.
 
@@ -57,9 +57,9 @@ npm run app:mock                     # the app on http://localhost:3000, with th
 
 Open http://localhost:3000 and press **Try the demo**. **Mock mode** uses a scripted shopper and a pretend PayPal, so the whole experience runs without any account or cost. Try:
 
-1. *New request*: "Wireless earbuds". Run it in the **Playground** and watch the guard turn Deal-Zone down.
-2. *New request* > **A gift or an occasion**: "Dad, Christmas, likes hiking and coffee".
-3. Open the control panel (http://localhost:3000/control/), press **Drop 15%** for Northgear, then open **Orders** and press **Check for problems**.
+1. *New request*: "Wireless earbuds" and a price. The shopper starts at once; watch the map turn Deal-Zone down.
+2. Wait about a minute. In the demo, the shop cuts the price of your first order, and its record shows something different from what you ordered on your second. The shopper refunds the price drop automatically, and asks you what arrived before it refunds anything else. The message at the top of the page opens your notifications (the bell). The wait is `DEMO_EVENT_SECONDS` (default 60; 0 turns the scripted events off).
+3. Or make it happen yourself: open the control panel (http://localhost:3000/control/), press **Drop 15%** for a shop, and your next check refunds the difference.
 4. Open http://localhost:3000/#/town in a second tab to see the public view.
 
 ### With the real Claude model and the PayPal sandbox

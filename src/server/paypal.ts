@@ -15,6 +15,10 @@ export interface PayPalConfig {
   webhookId?: string;
   payoutPollIntervalMs?: number;
   payoutPollCount?: number;
+  /** Extra tries when PayPal cannot be reached at all while asking for the access token (default 2). Asking for a token moves no money, so trying again is safe. */
+  tokenRetries?: number;
+  /** The wait before the first retry, doubled for each one after it (default 400 ms). */
+  retryDelayMs?: number;
 }
 
 type Raw = { status: number; body: any; debugId: string | null };
@@ -58,14 +62,28 @@ export function createPayPalClient(cfg: PayPalConfig): PayPalPort {
 
   async function token(): Promise<string> {
     if (cached && cached.expiresAt > Date.now() + 30_000) return cached.token;
-    const r = await raw("Get access token", "/v1/oauth2/token", {
-      method: "POST",
-      headers: {
-        Authorization: "Basic " + Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString("base64"),
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: "grant_type=client_credentials",
-    });
+    // A passing network failure (no answer at all, "fetch failed") should not fail a purchase. Asking for a token changes
+    // nothing at PayPal, so it is tried again a couple of times. An answer from PayPal, even a refusal, is never retried.
+    const retries = cfg.tokenRetries ?? 2;
+    let delay = cfg.retryDelayMs ?? 400;
+    let r: Raw | undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        r = await raw("Get access token", "/v1/oauth2/token", {
+          method: "POST",
+          headers: {
+            Authorization: "Basic " + Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString("base64"),
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: "grant_type=client_credentials",
+        });
+        break;
+      } catch (err) {
+        if (attempt >= retries) throw err;
+        await sleep(delay);
+        delay *= 2;
+      }
+    }
     if (r.status < 200 || r.status >= 300) throw failure("Get access token", r);
     cached = { token: r.body.access_token, expiresAt: Date.now() + (Number(r.body.expires_in) || 300) * 1000 };
     return cached.token;

@@ -947,3 +947,80 @@ test("the item prompt tells the shopper to simplify its words and try at least t
   assert.match(system, /do not give up\. Search again with fewer or simpler words/);
   assert.match(system, /at least 3 different searches/);
 });
+
+test("the item prompt says to buy the item itself and never an accessory for it", { skip }, async () => {
+  const model = scripted([() => reply([use("a", "give_up", { reason: "x" })])]);
+  await runShopperAgent(arena().base(model), { mandate: { ...mandate, item: "Laptop" }, shops: REFS });
+  const system = String(model.calls[0]!.system);
+  assert.match(system, /Buy the item itself, never an accessory or a part for it\. A laptop sleeve, stand or bag is not a laptop\./);
+  assert.match(system, /call give_up and say so, rather than buying something else/);
+  assert.match(system, /The owner's price is a ceiling, not a target\. Choose the cheapest listing that really is the item/);
+});
+
+
+// ---------- when nothing fits only because of the price ----------
+
+const openThenGiveUp = (urls: string[], reason: string) =>
+  scripted([
+    () => reply(urls.map((u, i) => use(`o${i}`, "open_page", { url: u }))),
+    () => reply([use("g", "give_up", { reason })]),
+  ]);
+
+test("giving up because everything real is too dear names the cheapest trusted option, worked out by code", { skip }, async () => {
+  const tent = { ...mandate, item: "Camping tent for adults", maxPriceCents: 10000 };
+  const run = await runShopperAgent(arena().base(openThenGiveUp([`${N}/products/tent-2p`, `${Z}/products/tent-2p`, `${Tr}/products/tent-2p`], "All too dear or untrusted.")), { mandate: tent, shops: REFS });
+  assert.equal(run.outcome.status, "gave_up");
+  // Deal-Zone is cheaper but not trusted (score 0), Northgear is dearer than Trailhead.
+  assert.deepEqual(run.outcome.status === "gave_up" && run.outcome.closest, { itemName: "Tent, 2 person", shopId: "trailhead", totalCents: 12800 });
+});
+
+test("the closest option is only the item itself, from a trusted shop, over the limit: not an accessory, not something affordable, not a banned category", { skip }, async () => {
+  // A laptop sleeve is not a laptop, so with a laptop wanted it is not offered as the closest thing.
+  const onlySleeve = await runShopperAgent(arena().base(openThenGiveUp([`${N}/products/laptop-sleeve`], "No laptop.")), { mandate: { ...mandate, item: "Laptop", maxPriceCents: 1000 }, shops: REFS });
+  assert.equal(onlySleeve.outcome.status === "gave_up" && onlySleeve.outcome.closest, undefined);
+  // The real laptop is, even though it is far over.
+  const laptop = await runShopperAgent(arena().base(openThenGiveUp([`${N}/products/laptop-sleeve`, `${N}/products/laptop-14`], "Too dear.")), { mandate: { ...mandate, item: "Laptop", maxPriceCents: 30000 }, shops: REFS });
+  assert.deepEqual(laptop.outcome.status === "gave_up" && laptop.outcome.closest, { itemName: "Laptop, 14 inch", shopId: "northgear", totalCents: 62100 });
+  // Something at or under the limit is not "over the limit".
+  const cheap = await runShopperAgent(arena().base(openThenGiveUp([`${N}/products/laptop-sleeve`], "Gave up anyway.")), { mandate: { ...mandate, item: "Laptop sleeve", maxPriceCents: 5000 }, shops: REFS });
+  assert.equal(cheap.outcome.status === "gave_up" && cheap.outcome.closest, undefined);
+  // Nothing opened, nothing to offer.
+  const none = await runShopperAgent(arena().base(scripted([() => reply([use("g", "give_up", { reason: "Nothing." })])])), { mandate: { ...mandate, item: "Laptop" }, shops: REFS });
+  assert.equal(none.outcome.status === "gave_up" && none.outcome.closest, undefined);
+});
+
+test("the item prompt asks for a short, scannable reason and not a list of searches", { skip }, async () => {
+  const model = scripted([() => reply([use("a", "give_up", { reason: "x" })])]);
+  await runShopperAgent(arena().base(model), { mandate, shops: REFS });
+  const system = String(model.calls[0]!.system);
+  assert.match(system, /write the reason in one or two short sentences that are easy to scan/);
+  assert.match(system, /Do not list the searches you made\./);
+});
+
+test("the shopper can name the closest listing it only saw on a search page, and code reads that page again before offering it", { skip }, async () => {
+  const give = (closest_page: string, item = "Laptop", maxPriceCents = 30000) =>
+    runShopperAgent(arena().base(scripted([() => reply([use("s", "open_page", { url: `${N}/search?q=laptop` })]), () => reply([use("g", "give_up", { reason: "Only a 14 inch, too dear.", closest_page })])])), { mandate: { ...mandate, item, maxPriceCents }, shops: REFS });
+  const closestOf = (run: Awaited<ReturnType<typeof give>>) => (run.outcome.status === "gave_up" ? run.outcome.closest : "not gave_up");
+
+  // It saw the laptop only in the search results and names its page: the page is read, and it is the real one.
+  assert.deepEqual(closestOf(await give(`${N}/products/laptop-14`)), { itemName: "Laptop, 14 inch", shopId: "northgear", totalCents: 62100 });
+  // Nothing named, nothing offered.
+  assert.equal(closestOf(await give("")), undefined);
+  // Words are not believed: an address that is not a shop's, a made-up page, an accessory, a listing within the limit, or a shop it cannot trust.
+  assert.equal(closestOf(await give("https://example.com/products/laptop-14")), undefined);
+  assert.equal(closestOf(await give(`${N}/products/does-not-exist`)), undefined);
+  assert.equal(closestOf(await give(`${N}/products/laptop-sleeve`)), undefined, "a sleeve is not a laptop");
+  assert.equal(closestOf(await give(`${N}/products/laptop-14`, "Laptop", 70000)), undefined, "it fits the limit, so it is not 'over' it");
+  assert.equal(closestOf(await give(`${Z}/products/laptop-stand`, "Laptop stand", 1000)), undefined, "Deal-Zone's score is 0");
+});
+
+test("give_up asks for the closest page too, and the prompt says when to give it", { skip }, async () => {
+  const model = scripted([() => reply([use("a", "give_up", { reason: "x", closest_page: "" })])]);
+  await runShopperAgent(arena().base(model), { mandate, shops: REFS });
+  const tool = (model.calls[0]!.tools as Array<{ name: string; strict?: boolean; input_schema: { properties: Record<string, unknown>; required: string[] } }>).find((t) => t.name === "give_up")!;
+  assert.deepEqual(Object.keys(tool.input_schema.properties).sort(), ["closest_page", "reason"]);
+  assert.deepEqual([...tool.input_schema.required].sort(), ["closest_page", "reason"]);
+  assert.equal(tool.strict, true);
+  assert.match(String(model.calls[0]!.system), /also give the address of its product page in closest_page/);
+});
+

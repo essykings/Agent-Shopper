@@ -22,6 +22,9 @@ import { Hub } from "./hub.ts";
 import type { Feed } from "../shared/events.ts";
 import type { AppDeps } from "./api.ts";
 import { createMockModel } from "./mock.ts";
+import { giveUpBody } from "../shared/messages.ts";
+import { refundOpenCases, runAftercareSweep } from "../server/aftercare-auto.ts";
+import { applyDemoEvents } from "../server/demo-events.ts";
 import { signSession, verifySession } from "./session.ts";
 
 const NOW = new Date("2026-11-11T12:00:00Z");
@@ -79,7 +82,7 @@ after(async () => {
 });
 
 /** pathShops: the shops live under /shops/<name> of the app itself and are read in process, as on Render. Otherwise each has its own host. */
-function harness(over: { limits?: Partial<Limits>; model?: ModelPort; mock?: boolean; hub?: Hub; diagToken?: string; pathShops?: boolean } = {}) {
+function harness(over: { limits?: Partial<Limits>; model?: ModelPort; mock?: boolean; hub?: Hub; diagToken?: string; pathShops?: boolean; autoRefund?: boolean; demoEventSeconds?: number; queueWaitSeconds?: number } = {}) {
   const apps = new Map(REFS.map((r) => [new URL(r.baseUrl).host, createShopApp(pool, findShop(r.id)!, { now: () => NOW })]));
   const shopsApp = over.pathShops ? createShopsApp(pool, { publicUrl: "http://app.test", now: () => NOW }) : null;
   const shopRefs: ShopRef[] = over.pathShops ? SHOPS.map((s) => ({ id: s.id, baseUrl: shopAddress("http://app.test", s.id) })) : REFS;
@@ -112,6 +115,9 @@ function harness(over: { limits?: Partial<Limits>; model?: ModelPort; mock?: boo
     hub: over.hub ?? new Hub(),
     ...(over.diagToken ? { diagToken: over.diagToken } : {}),
     mock: over.mock ?? true,
+    ...(over.autoRefund !== undefined ? { autoRefund: over.autoRefund } : {}),
+    ...(over.demoEventSeconds !== undefined ? { demoEventSeconds: over.demoEventSeconds } : {}),
+    ...(over.queueWaitSeconds !== undefined ? { queueWaitSeconds: over.queueWaitSeconds } : {}),
     getIp: (c) => c.req.header("x-test-ip") ?? "203.0.113.1",
   };
   return { api: createApi(pool, deps), fake, counted, deps };
@@ -169,13 +175,13 @@ test("signing in as a demo creates an account with an allowance and the shops al
   assert.doesNotMatch(set, /Secure/, "secure cookies are for https and are switched on in production");
   const me = await b.get("/api/me");
   assert.equal(me.status, 200);
-  assert.deepEqual(me.json.balances, { monthlyAllowanceCents: 50000, monthSpentCents: 0, setAsideCents: 0, freeCents: 50000 });
+  assert.deepEqual(me.json.balances, { monthlyAllowanceCents: 100000, monthSpentCents: 0, setAsideCents: 0, freeCents: 100000 });
   assert.equal(me.json.paused, false);
   assert.equal(me.json.mock, true);
   assert.deepEqual(me.json.payment, { source: "demo", email: null });
   const shops = (await b.get("/api/shops")).json.shops;
   assert.deepEqual(shops.map((s: any) => s.id), ["northgear", "deal-zone", "trailhead"]);
-  assert.ok((await b.get("/api/ledger")).json.entries.some((e: any) => e.kind === "allowance_set" && e.amountCents === 50000));
+  assert.ok((await b.get("/api/ledger")).json.entries.some((e: any) => e.kind === "allowance_set" && e.amountCents === 100000));
 });
 
 test("nothing works without a valid sign-in", { skip }, async () => {
@@ -230,17 +236,21 @@ test("a new request is checked carefully, and cannot use more than the free allo
   const { b } = await signedIn();
   const bad: Array<[string, Record<string, unknown>]> = [
     ["a short name", { item: "ab" }], ["no name", { item: undefined }], ["a price with cents in it", { maxPriceCents: 99.5 }],
-    ["a price under $1", { maxPriceCents: 50 }], ["a price over $500", { maxPriceCents: 60000 }],
+    ["a price under $1", { maxPriceCents: 50 }], ["a price over $1,000", { maxPriceCents: 100001 }],
     ["an ask-me limit above the price limit", { askAboveCents: 20000 }], ["a score over 100", { sellerMinScore: 101 }],
     ["a past deadline", { deadline: "2020-01-01" }], ["a far deadline", { deadline: "2099-01-01" }], ["a bad date", { deadline: "soon" }],
     ["too many banned categories", { neverBuy: Array.from({ length: 11 }, (_, i) => `c${i}`) }], ["a banned category that is not text", { neverBuy: [5] }],
   ];
   for (const [label, over] of bad) assert.equal((await b.post("/api/requests", earbuds(over))).status, 400, label);
-  for (let i = 0; i < 5; i++) assert.equal((await b.post("/api/requests", earbuds())).status, 201);
+  for (let i = 0; i < 10; i++) assert.equal((await b.post("/api/requests", earbuds())).status, 201);
   const over = await b.post("/api/requests", earbuds());
   assert.equal(over.status, 409);
   assert.match(over.json.error, /allowance is free/);
-  assert.equal((await b.get("/api/requests")).json.requests.length, 5);
+  assert.equal((await b.get("/api/requests")).json.requests.length, 10);
+  // A request bigger than $500 is fine now, as long as the allowance can hold it: the allowance is the limit.
+  const { b: b2 } = await signedIn(harness(), "203.0.113.91");
+  assert.equal((await b2.post("/api/requests", earbuds({ maxPriceCents: 62500, askAboveCents: 62500 }))).status, 201, "$625 fits a $1,000 allowance");
+  assert.equal((await b2.post("/api/requests", earbuds({ maxPriceCents: 62500, askAboveCents: 62500 }))).status, 409, "a second $625 does not");
 });
 
 test("an allowed request goes all the way: the cheap scam listing is refused, the honest one is bought, the shop gets the order", { skip }, async () => {
@@ -310,7 +320,12 @@ test("a wordy request still finds the product, and an item no shop sells is trie
   assert.equal(run.json.outcome.tried[0], "unicorn saddle");
   const searched = (run.json.actions as Array<{ summary: string }>).filter((a) => /search\?/.test(a.summary));
   assert.ok(searched.length >= 9, `three tries in each of three shops, got ${searched.length}`);
-  assert.equal((await b.get("/api/requests")).json.requests.find((r: any) => r.id === nothing.json.id).status, "active", "nothing bought, nothing charged, still open");
+  const closed = (await b.get("/api/requests")).json.requests.find((r: any) => r.id === nothing.json.id);
+  assert.equal(closed.status, "expired", "the shopper gave up for good, so the request is closed");
+  assert.equal(run.json.closed, true);
+  assert.match(closed.closedOutcome.reason, /could not find/i, "and what it said is kept for the page to show later");
+  assert.deepEqual(closed.closedOutcome.tried.slice(0, 2), ["unicorn saddle", "unicorn"]);
+  assert.equal((await b.get("/api/me")).json.balances.setAsideCents, 0, "nothing bought, nothing charged, and the held money is free again");
 });
 
 test("each shop comes with an address a browser can open", { skip }, async () => {
@@ -395,9 +410,9 @@ test("a paused shopper cannot run or buy, and starts again when resumed", { skip
 test("cancelling a request gives its set-aside back, once", { skip }, async () => {
   const { b } = await signedIn();
   const { json: created } = await b.post("/api/requests", earbuds());
-  assert.equal((await b.get("/api/me")).json.balances.freeCents, 40000);
+  assert.equal((await b.get("/api/me")).json.balances.freeCents, 90000);
   assert.equal((await b.post(`/api/requests/${created.id}/cancel`)).status, 200);
-  assert.equal((await b.get("/api/me")).json.balances.freeCents, 50000);
+  assert.equal((await b.get("/api/me")).json.balances.freeCents, 100000);
   assert.equal((await b.post(`/api/requests/${created.id}/cancel`)).status, 404);
   assert.equal((await b.post(`/api/requests/${created.id}/run`)).status, 409, "a cancelled request cannot run");
   assert.ok((await b.get("/api/ledger")).json.entries.some((e: any) => e.kind === "set_aside_release" && e.amountCents === 10000));
@@ -428,7 +443,7 @@ test("one person can never see or act on another person's requests, orders or mo
   assert.equal((await other.post(`/api/requests/${created.id}/approve`, { proposalId: run.json.proposalId, approvedTotalCents: 4500 })).status, 404);
   assert.deepEqual((await other.get("/api/requests")).json.requests, []);
   assert.deepEqual((await other.get("/api/orders")).json.orders, []);
-  assert.equal((await other.get("/api/me")).json.balances.freeCents, 50000);
+  assert.equal((await other.get("/api/me")).json.balances.freeCents, 100000);
   assert.equal(h.fake.calls.length, 0);
 });
 
@@ -978,7 +993,7 @@ test("a wrong item opens a case for the whole price, with what arrived as eviden
   await shipOrder(pool, orderId, true);
   const c = (await b.post("/api/aftercare/check")).json.cases[0];
   assert.deepEqual([c.kind, c.status, c.amountCents], ["wrong_item", "open", 4500]);
-  assert.match(c.summary, /You ordered "Wireless earbuds" but the shop's delivery record says it sent "A different, cheaper item than the one ordered"/);
+  assert.match(c.summary, /The shop's delivery record shows "A different, cheaper item than the one ordered" for your order of "Wireless earbuds"/);
   assert.equal(c.evidence.arrived.description, "A different, cheaper item than the one ordered");
   assert.equal(c.evidence.listing.condition, "Brand new, factory sealed.");
   assert.match(c.evidence.shopPolicy.returns, /30-day returns/);
@@ -986,7 +1001,7 @@ test("a wrong item opens a case for the whole price, with what arrived as eviden
   assert.deepEqual([r.json.result.status, r.json.result.amountCents], ["refunded", 4500]);
   assert.deepEqual(refundCalls(fake).map((x) => [x.captureId, x.amountCents]), [[captureId, 4500]]);
   assert.equal((await b.get("/api/me")).json.balances.monthSpentCents, 0);
-  assert.match(refundCalls(fake)[0]!.note, /Wrong item refund/);
+  assert.match(refundCalls(fake)[0]!.note, /Refund: the item did not match the order/);
 });
 
 test("two problems on one order can never refund more than was paid, and the database refuses it too", { skip }, async () => {
@@ -1397,3 +1412,306 @@ test("the status endpoint gives a signed-in person their own count, and nobody e
   assert.deepEqual(await status(other.b.cookie), { shoppingNow: 0, finishedToday: 1, mineToday: 0 });
   assert.deepEqual(await status(), { shoppingNow: 0, finishedToday: 1 }, "a stranger gets only the total");
 });
+
+// ---------- automatic aftercare: scripted shop events, automatic refunds, notifications ----------
+
+const sweepDeps = (h: ReturnType<typeof harness>) => ({ paypal: h.fake, fetchPage: h.deps.buy.fetchPage, shops: h.deps.shops });
+const age = (minutes: number) => pool.query("update orders set created_at = now() - make_interval(mins => $1) where created_at > now() - interval '1 day'", [minutes]);
+/** The aftercare pass looks at everyone's recent orders, so each of these tests first sets earlier tests' orders aside. */
+const clean = async () => {
+  await pool.query("update shop_orders set demo_event = 'none' where demo_event is null");
+  await pool.query("update cases set status = 'closed' where status = 'open'");
+  await pool.query("update orders set created_at = now() - interval '40 days'");
+};
+const buyBottle = async (b: ReturnType<typeof browser>, item = "Water bottle") => {
+  const made = await b.post("/api/requests", { kind: "item", item, maxPriceCents: 3500 });
+  const run = await b.post(`/api/requests/${made.json.id}/run`);
+  assert.equal(run.json.result?.status, "paid_out", JSON.stringify(run.json).slice(0, 200));
+};
+
+test("a demo purchase gets its scripted price drop a minute later and is refunded automatically, once, with notices", { skip }, async () => {
+  await clean();
+  const h = harness({ autoRefund: true, demoEventSeconds: 60 });
+  const { b } = await signedIn(h);
+  await buyBottle(b);
+
+  // Straight after buying, nothing has happened yet: the shop waits a minute.
+  assert.deepEqual(await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 }), { events: 0, refunds: 0 });
+  assert.equal((await b.get("/api/cases")).json.cases.length, 0);
+
+  await age(2);
+  assert.deepEqual(await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 }), { events: 1, refunds: 1 });
+  const cases = (await b.get("/api/cases")).json.cases;
+  assert.equal(cases.length, 1);
+  const orders = (await b.get("/api/orders")).json.orders;
+  const paid = orders[0].totalCents as number;
+  const cut = Math.round(paid * 0.15);
+  assert.deepEqual([cases[0].kind, cases[0].status, cases[0].amountCents], ["price_drop", "refunded", cut], `15% of the ${paid} cents paid, refunded without a button`);
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1);
+  assert.equal(orders[0].refundedCents, cut);
+
+  // The shop's own order record says so, and a second pass does nothing more.
+  const orderId = orders[0].id;
+  const shopPage = await (await createShopApp(pool, findShop(orders[0].shopId)!).request(`/orders/${orderId}`)).text();
+  assert.match(shopPage, /cut the price of this item by 15%/);
+  assert.deepEqual(await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 }), { events: 0, refunds: 0 });
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1, "never refunded twice");
+
+  // The owner was told twice: what was bought, then the refund.
+  const notes = (await b.get("/api/notifications")).json;
+  assert.equal(notes.unread, 2);
+  assert.deepEqual(notes.items.map((n: any) => n.kind).sort(), ["bought", "refunded"]);
+  const dollars = (c: number) => `$${(c / 100).toFixed(2)}`;
+  assert.equal(notes.items.find((n: any) => n.kind === "refunded").text, `${orders[0].shopName} cut its price on ${orders[0].itemName}, so you were refunded ${dollars(cut)} automatically.`);
+  assert.equal(notes.items.find((n: any) => n.kind === "bought").text, `Bought ${orders[0].itemName} for ${dollars(paid)} from ${orders[0].shopName}.`);
+  assert.equal((await b.post("/api/notifications/read")).status, 200);
+  assert.equal((await b.get("/api/notifications")).json.unread, 0);
+});
+
+test("the second demo purchase gets the wrong item and the owner is asked, not refunded; the answer decides; later orders get nothing", { skip }, async () => {
+  await clean();
+  const h = harness({ autoRefund: true, demoEventSeconds: 60 });
+  const { b } = await signedIn(h);
+  await buyBottle(b, "Water bottle");
+  await buyBottle(b, "First aid kit");
+  await buyBottle(b, "Wool hat");
+  await age(2);
+  // Only the price drop is refunded by itself.
+  assert.deepEqual(await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 }), { events: 2, refunds: 1 });
+  const cases = (await b.get("/api/cases")).json.cases as any[];
+  assert.equal(cases.length, 2, "the third order got no event");
+  const wrong = cases.find((c) => c.kind === "wrong_item");
+  assert.equal(wrong.status, "open", "a wrong item waits for the owner to say what arrived");
+  assert.equal(cases.find((c) => c.kind === "price_drop").status, "refunded");
+  const second = (await b.get("/api/orders")).json.orders.find((o: any) => o.id === wrong.orderId);
+  assert.equal(wrong.amountCents, second.totalCents, "the whole amount paid for that order");
+
+  // They are asked, once, with what the shop's record says.
+  const asked = (await b.get("/api/notifications")).json.items.filter((n: any) => n.kind === "question");
+  assert.equal(asked.length, 1);
+  assert.match(asked[0].text, new RegExp(`^Please check your ${second.itemName} from ${second.shopName}: the shop's delivery record lists ".+" instead\\. Did you receive something different\\? If so, you can be refunded \\$${(second.totalCents / 100).toFixed(2).replace(".", "\\.")}\\.$`));
+  assert.doesNotMatch(asked[0].text, /wrong item|sent the/i, "the shop is not accused of anything");
+  // However many times the pass runs, and however long it waits, the app never refunds a wrong item on its own.
+  for (let i = 0; i < 4; i++) {
+    await pool.query("update cases set auto_attempt_at = now() - interval '1 hour'");
+    await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 });
+    await b.post("/api/aftercare/check");
+  }
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1, "only the price drop was refunded");
+  assert.equal((await b.get("/api/notifications")).json.items.filter((n: any) => n.kind === "question").length, 1, "and the question was not asked again");
+
+  // "Yes, I received something different" refunds the whole amount; the same press again does nothing more.
+  const yes = await b.post(`/api/cases/${wrong.id}/refund`);
+  assert.deepEqual([yes.json.result.status, yes.json.result.amountCents], ["refunded", second.totalCents]);
+  assert.equal((await b.post(`/api/cases/${wrong.id}/refund`)).status, 409);
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 2);
+});
+
+test("'No, it is fine' closes a wrong-item question without refunding anything", { skip }, async () => {
+  await clean();
+  const h = harness({ autoRefund: true, demoEventSeconds: 60 });
+  const { b } = await signedIn(h);
+  await buyBottle(b, "Water bottle");
+  await buyBottle(b, "First aid kit");
+  await age(2);
+  await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 });
+  const wrong = ((await b.get("/api/cases")).json.cases as any[]).find((c) => c.kind === "wrong_item");
+  assert.equal((await b.post(`/api/cases/${wrong.id}/decline`)).status, 200);
+  assert.equal(((await b.get("/api/cases")).json.cases as any[]).find((c) => c.id === wrong.id).status, "declined");
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1, "only the price drop");
+});
+
+test("scripted events are only for demo accounts, and only when switched on", { skip }, async () => {
+  await clean();
+  const h = harness({ autoRefund: true });
+  const { b } = await signedIn(h);
+  await buyBottle(b);
+  await age(5);
+  assert.equal(await applyDemoEvents(pool, { delaySeconds: 0 }), 0, "off by default");
+  await pool.query("update users set paypal_source = 'own'");
+  assert.equal(await applyDemoEvents(pool, { delaySeconds: 60 }), 0, "an account with its own PayPal gets none");
+  await pool.query("update users set paypal_source = 'demo'");
+  assert.equal(await applyDemoEvents(pool, { delaySeconds: 60 }), 1);
+  assert.equal(await applyDemoEvents(pool, { delaySeconds: 60 }), 0, "once");
+});
+
+test("an automatic refund that fails is tried again a while later, three times, and then left for the owner's button", { skip }, async () => {
+  await clean();
+  const h = harness({ autoRefund: true, demoEventSeconds: 60 });
+  const { b } = await signedIn(h);
+  await buyBottle(b);
+  await age(2);
+  h.fake.refundOutcomes = ["failed", "failed", "failed"];
+  await runAftercareSweep(pool, sweepDeps(h), { demoEventSeconds: 60 });
+  assert.equal((await b.get("/api/cases")).json.cases[0].status, "open", "not refunded yet");
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1);
+
+  await refundOpenCases(pool, sweepDeps(h));
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 1, "not retried straight away");
+  for (let i = 0; i < 2; i++) {
+    await pool.query("update cases set auto_attempt_at = now() - interval '11 minutes'");
+    await refundOpenCases(pool, sweepDeps(h));
+  }
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 3);
+  await pool.query("update cases set auto_attempt_at = now() - interval '11 minutes'");
+  await refundOpenCases(pool, sweepDeps(h));
+  assert.equal(h.fake.calls.filter((c) => c.method === "refund").length, 3, "three tries and no more");
+
+  const notes = (await b.get("/api/notifications")).json.items.filter((n: any) => n.kind === "refund_failed");
+  assert.equal(notes.length, 3);
+  assert.ok(notes.some((n: any) => /Open Orders to refund it yourself/.test(n.text)));
+  // The owner's button still works, since the case is open.
+  const caseId = (await b.get("/api/cases")).json.cases[0].id;
+  assert.equal((await b.post(`/api/cases/${caseId}/refund`)).json.result.status, "refunded");
+});
+
+test("pressing 'check for problems' refunds what is owed straight away when automatic refunds are on, and not when they are off", { skip }, async () => {
+  for (const auto of [true, false]) {
+    await clean();
+    const h = harness({ autoRefund: auto });
+    const { b } = await signedIn(h, auto ? "203.0.113.81" : "203.0.113.82");
+    await buyBottle(b);
+    const shopId = (await b.get("/api/orders")).json.orders[0].shopId as string;
+    await setPriceAdjust(pool, shopId, -15);
+    const cases = (await b.post("/api/aftercare/check")).json.cases;
+    assert.equal(cases.length, 1);
+    assert.equal(cases[0].status, auto ? "refunded" : "open", auto ? "refunded without a button" : "waits for the button");
+    await setPriceAdjust(pool, shopId, 0);
+  }
+});
+
+test("notices belong to one person, need a sign-in, and are never told twice", { skip }, async () => {
+  await clean();
+  const h = harness({ autoRefund: true });
+  const a = (await signedIn(h, "203.0.113.83")).b;
+  const other = (await signedIn(h, "203.0.113.84")).b;
+  assert.equal((await h.api.request("/api/notifications")).status, 401);
+  assert.equal((await h.api.request("/api/notifications/read", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
+  await buyBottle(a);
+  assert.equal((await a.get("/api/notifications")).json.items.length, 1);
+  assert.deepEqual((await other.get("/api/notifications")).json, { items: [], unread: 0 }, "someone else sees nothing");
+  await a.post("/api/notifications/read");
+  assert.equal((await other.get("/api/notifications")).json.unread, 0);
+  const made = await a.post("/api/requests", { kind: "item", item: "Unicorn saddle", maxPriceCents: 5000 });
+  await a.post(`/api/requests/${made.json.id}/run`);
+  const items = (await a.get("/api/notifications")).json.items;
+  assert.ok(items.some((n: any) => n.kind === "not_found" && /Unicorn saddle/.test(n.text)), "a search that finds nothing is told too");
+});
+
+test("asking for a laptop never buys a laptop sleeve: the item itself, or nothing", { skip }, async () => {
+  const { b, fake } = await signedIn();
+  // The only laptop ($621) costs more than this, so nothing may be bought, and no accessory stands in for it.
+  const made = await b.post("/api/requests", { kind: "item", item: "Laptop", maxPriceCents: 30_000 });
+  const run = await b.post(`/api/requests/${made.json.id}/run`);
+  assert.equal(run.json.stage, "agent", JSON.stringify(run.json).slice(0, 200));
+  assert.deepEqual(fake.calls, [], "nothing was charged");
+  assert.equal((await b.get("/api/orders")).json.orders.length, 0);
+
+  // Asking for the accessory by name buys the accessory.
+  const sleeve = await b.post("/api/requests", { kind: "item", item: "Laptop sleeve", maxPriceCents: 5000 });
+  const bought = await b.post(`/api/requests/${sleeve.json.id}/run`);
+  assert.equal(bought.json.result?.status, "paid_out");
+  assert.match((await b.get("/api/orders")).json.orders[0].itemName, /Laptop sleeve/);
+
+  // A water bottle is a bottle, not the water blaster that also says "water".
+  const bottle = await b.post("/api/requests", { kind: "item", item: "Water bottle", maxPriceCents: 5000 });
+  assert.equal((await b.post(`/api/requests/${bottle.json.id}/run`)).json.result?.status, "paid_out");
+  const names = ((await b.get("/api/orders")).json.orders as any[]).map((o) => o.itemName);
+  assert.ok(names.some((n) => /Water bottle/.test(n)) && !names.some((n) => /blaster/i.test(n)), JSON.stringify(names));
+});
+
+
+// ---------- several requests at once ----------
+
+test("two requests at once take their turns instead of the second failing, and both are bought", { skip }, async () => {
+  const mock = createMockModel();
+  const slow: ModelPort = async (p) => {
+    await new Promise((r) => setTimeout(r, 25));
+    return mock(p);
+  };
+  const h = harness({ model: slow, limits: { maxConcurrent: 1 } });
+  const { b } = await signedIn(h);
+  const one = await b.post("/api/requests", { kind: "item", item: "Wool hat", maxPriceCents: 3000 });
+  const two = await b.post("/api/requests", { kind: "item", item: "First aid kit", maxPriceCents: 3000 });
+  const [r1, r2] = await Promise.all([b.post(`/api/requests/${one.json.id}/run`), b.post(`/api/requests/${two.json.id}/run`)]);
+  assert.deepEqual([r1.status, r2.status], [200, 200], JSON.stringify([r1.json, r2.json]).slice(0, 300));
+  assert.deepEqual([r1.json.result?.status, r2.json.result?.status], ["paid_out", "paid_out"], "the second one waited for its turn and was bought too");
+  assert.equal((await b.get("/api/orders")).json.orders.length, 2);
+});
+
+test("a request that has waited too long for its turn says so in plain words, and the request list shows what is working", { skip }, async () => {
+  const mock = createMockModel();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((r) => (release = r));
+  let first = true;
+  const blocked: ModelPort = async (p) => {
+    if (first) {
+      first = false;
+      await gate; // the first run is stuck here until the test lets it go
+    }
+    return mock(p);
+  };
+  const h = harness({ model: blocked, limits: { maxConcurrent: 1 }, queueWaitSeconds: 1 });
+  const { b } = await signedIn(h);
+  const one = await b.post("/api/requests", { kind: "item", item: "Wool hat", maxPriceCents: 3000 });
+  const two = await b.post("/api/requests", { kind: "item", item: "Water bottle", maxPriceCents: 3000 });
+  const firstRun = b.post(`/api/requests/${one.json.id}/run`);
+  await new Promise((r) => setTimeout(r, 300));
+  const list = (await b.get("/api/requests")).json.requests as any[];
+  assert.equal(list.find((r) => r.id === one.json.id).working, true, "the one that is running says so");
+  assert.equal(list.find((r) => r.id === two.json.id).working, false);
+
+  const late = await b.post(`/api/requests/${two.json.id}/run`);
+  assert.equal(late.status, 429);
+  assert.equal(late.json.code, "busy");
+  assert.match(late.json.error, /A run is already in progress/);
+
+  release();
+  assert.equal((await firstRun).json.result?.status, "paid_out");
+  assert.equal(((await b.get("/api/requests")).json.requests as any[]).find((r) => r.id === one.json.id).working, false, "and stops saying so when it is done");
+});
+
+test("a request the shopper gave up on keeps what it said, including the closest option, after the page is reloaded", { skip }, async () => {
+  const { b } = await signedIn();
+  const made = await b.post("/api/requests", { kind: "item", item: "Camping tent for adults", maxPriceCents: 10_000 });
+  const run = await b.post(`/api/requests/${made.json.id}/run`);
+  assert.equal(run.json.closed, true);
+  const row = ((await b.get("/api/requests")).json.requests as any[]).find((r) => r.id === made.json.id);
+  assert.equal(row.status, "expired");
+  assert.deepEqual(row.closedOutcome.closest, { itemName: "Tent, 2 person", shopId: "trailhead", totalCents: 12_800 });
+  assert.ok(row.closedOutcome.reason.length > 0 && row.closedOutcome.tried.length >= 1);
+  assert.equal(row.working, false);
+  assert.equal((await b.get("/api/me")).json.balances.setAsideCents, 0, "the money held for it is free again");
+  assert.equal((await b.post(`/api/requests/${made.json.id}/run`)).status, 409, "a closed request is not searched again; a new one is made instead");
+
+  // The notification and the request say the same thing: one builder writes the body of both.
+  const note = ((await b.get("/api/notifications")).json.items as any[]).find((n) => n.kind === "not_found");
+  assert.equal(note.text, `Nothing was bought for "Camping tent for adults". ${giveUpBody({ reason: row.closedOutcome.reason, closest: row.closedOutcome.closest })}`);
+  assert.match(note.text, /The cheapest option from a shop you can trust is Tent, 2 person at Trailhead for \$128\.00\./);
+});
+
+test("when the AI service refuses the app's key or is busy, the person is told so plainly and nothing is bought", { skip }, async () => {
+  const refused: ModelPort = async () => {
+    throw Object.assign(new Error('401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}'), { status: 401 });
+  };
+  const h = harness({ model: refused });
+  const { b, fake } = await signedIn(h);
+  const made = await b.post("/api/requests", { kind: "item", item: "Wool hat", maxPriceCents: 3000 });
+  const run = await b.post(`/api/requests/${made.json.id}/run`);
+  assert.equal(run.status, 503);
+  assert.match(run.json.error, /The shopper is unavailable right now, so nothing was bought\. The app's AI key needs checking\./);
+  assert.doesNotMatch(JSON.stringify(run.json), /x-api-key|authentication_error/, "the service's own words stay in the log");
+  assert.deepEqual(fake.calls, []);
+  assert.equal(((await b.get("/api/requests")).json.requests as any[])[0].status, "active", "the request is still open to try again");
+
+  const busy: ModelPort = async () => {
+    throw Object.assign(new Error("529 overloaded"), { status: 529 });
+  };
+  const h2 = harness({ model: busy });
+  const { b: b2 } = await signedIn(h2, "203.0.113.93");
+  const made2 = await b2.post("/api/requests", { kind: "item", item: "Wool hat", maxPriceCents: 3000 });
+  const run2 = await b2.post(`/api/requests/${made2.json.id}/run`);
+  assert.equal(run2.status, 503);
+  assert.match(run2.json.error, /The AI service is busy right now, so nothing was bought\. Try again in a moment\./);
+});
+

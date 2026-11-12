@@ -5,29 +5,24 @@ import { Note } from "./ui";
 
 const dollars = (s: string): number => Math.round(Number(s) * 100);
 
-// Things the demo shops really sell, with a price that is enough to buy them. Each time the form opens it suggests
-// a different one, so people do not all start with the same earbuds.
-const SUGGESTIONS: Array<{ item: string; price: string }> = [
-  { item: "Wireless earbuds", price: "60" },
-  { item: "Bluetooth speaker", price: "80" },
-  { item: "Webcam", price: "50" },
-  { item: "Power bank", price: "40" },
-  { item: "USB-C hub", price: "60" },
-  { item: "Trail socks", price: "50" },
-  { item: "Headlamp", price: "50" },
-  { item: "Water bottle", price: "35" },
-  { item: "First aid kit", price: "35" },
-  { item: "Wool hat", price: "30" },
-  { item: "Mechanical keyboard", price: "90" },
-  { item: "Wireless mouse", price: "35" },
-];
+// Things the demo shops sell, to show what a request looks like. No price: the shopper finds the real ones.
+const EXAMPLES = ["Wireless earbuds", "Bluetooth speaker", "Webcam", "Power bank", "USB-C hub", "Trail socks", "Headlamp", "Water bottle", "First aid kit", "Wool hat", "Mechanical keyboard", "Wireless mouse"];
+
+/** The most to pay when nothing else is said. It is only a ceiling: the shopper chooses the cheapest listing that really is the item. */
+const DEFAULT_LIMIT = "150";
 
 // A request is two things: what to buy, and the most to pay. The rest (deadline, shop score, never-buy list)
 // has sensible defaults on the server, and the shopper starts as soon as the request is saved.
-export function NewRequest({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
-  const [start] = useState(() => SUGGESTIONS[Math.floor(Math.random() * SUGGESTIONS.length)]!);
-  const [item, setItem] = useState(start.item);
-  const [maxPrice, setMaxPrice] = useState(start.price);
+/** A request to start filled in: for "raise my limit and search again" or "try again". */
+export interface NewPrefill {
+  item: string;
+  priceCents: number;
+  replaces?: string;
+}
+
+export function NewRequest({ onClose, onCreated, initial }: { onClose: () => void; onCreated: (id: string) => void; initial?: NewPrefill | null }) {
+  const [item, setItem] = useState(() => initial?.item ?? EXAMPLES[Math.floor(Math.random() * EXAMPLES.length)]!);
+  const [maxPrice, setMaxPrice] = useState(initial ? String(Math.round(initial.priceCents / 100)) : DEFAULT_LIMIT);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -37,6 +32,8 @@ export function NewRequest({ onClose, onCreated }: { onClose: () => void; onCrea
     setSaving(true);
     try {
       const made = await api<{ id: string }>("POST", "/api/requests", { kind: "item", item, maxPriceCents: dollars(maxPrice) });
+      // The earlier request is closed once the new one exists, so its held money is free again and it is not searched twice.
+      if (initial?.replaces) await api("POST", `/api/requests/${initial.replaces}/cancel`, {}).catch(() => undefined);
       onCreated(made.id);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not start the request.");
@@ -59,11 +56,11 @@ export function NewRequest({ onClose, onCreated }: { onClose: () => void; onCrea
         <div className="field">
           <label htmlFor="nr-max">Most you will pay ($)</label>
           <input id="nr-max" inputMode="decimal" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} />
-          <small>Including shipping. Your shopper buys the best match at or under this, without asking you.</small>
+          <small>Including shipping. Your shopper checks all three shops and buys the best match at or under this, without asking you. It is the most it may spend, not what it will spend.</small>
         </div>
         {error && <Note tone="err">{error}</Note>}
         <div className="row" style={{ marginTop: 16 }}>
-          <button className="btn" disabled={saving}>{saving ? "Starting…" : "Find and buy it"}</button>
+          <button className="btn" disabled={saving || item.trim().length < 3 || !(dollars(maxPrice) >= 100)}>{saving ? "Starting…" : "Find and buy it"}</button>
         </div>
       </form>
     </div>

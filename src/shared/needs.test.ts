@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { badgeCount, needsYou, visibleNeeds } from "./needs.ts";
 import type { NeedItem, NeedsCase, NeedsInput, NeedsRequest } from "./needs.ts";
 
+const notice = (id: string, kind: string, text: string) => ({ id, kind, text });
+
 const request = (over: Partial<NeedsRequest> = {}): NeedsRequest => ({ id: "r1", item: "Wireless earbuds", status: "active", hasOrder: false, ideas: 0, approval: null, recipient: null, ...over });
-const refund = (over: Partial<NeedsCase> = {}): NeedsCase => ({ id: "c1", orderId: "o1", kind: "price_drop", status: "open", amountCents: 600, itemName: "Wireless earbuds", shopName: "Northgear", ...over });
-const input = (over: Partial<NeedsInput> = {}): NeedsInput => ({ paused: false, paymentSource: "demo", requests: [], cases: [], ...over });
+const refund = (over: Partial<NeedsCase> = {}): NeedsCase => ({ id: "c1", orderId: "o1", kind: "price_drop", status: "open", amountCents: 600, itemName: "Wireless earbuds", shopName: "Northgear", failure: null, ...over });
+const input = (over: Partial<NeedsInput> = {}): NeedsInput => ({ paused: false, paymentSource: "demo", requests: [], cases: [], notices: [], autoRefund: false, ...over });
 const kinds = (items: NeedItem[]) => items.map((i) => i.kind);
 
 test("when nothing is waiting there is nothing to show", () => {
@@ -13,13 +15,9 @@ test("when nothing is waiting there is nothing to show", () => {
   assert.deepEqual(needsYou(input({ requests: [request({ status: "fulfilled", hasOrder: true }), request({ id: "r2", status: "cancelled" })] })), []);
 });
 
-test("a request that has not been run yet is 'ready', and several are counted", () => {
-  const one = needsYou(input({ requests: [request()] }));
-  assert.deepEqual(kinds(one), ["ready"]);
-  assert.equal(one[0]!.text, "Not bought yet: Wireless earbuds.");
-  assert.deepEqual(one[0]!.action, { label: "Search again", href: "#/" });
-  const many = needsYou(input({ requests: [request(), request({ id: "r2", item: "Daypack" }), request({ id: "r3", item: "Kettle" })] }));
-  assert.deepEqual([many.length, many[0]!.text], [1, "3 requests are not bought yet."]);
+test("a request that has not been bought is not announced at the top: the list of requests says so", () => {
+  assert.deepEqual(needsYou(input({ requests: [request()] })), []);
+  assert.deepEqual(needsYou(input({ requests: [request(), request({ id: "r2", item: "Daypack" }), request({ id: "r3", item: "Kettle" })] })), []);
 });
 
 test("gift ideas waiting are said in words, with who they are for, and singular or plural", () => {
@@ -51,7 +49,9 @@ test("a refund the owner can claim is offered, with the larger claim when one or
   assert.deepEqual(price[0]!.action, { label: "Review the refund", href: "#/orders" });
   const both = needsYou(input({ cases: [refund(), refund({ id: "c2", kind: "wrong_item", amountCents: 4500 })] }));
   assert.equal(both.length, 1, "two claims on one payment show once");
-  assert.equal(both[0]!.text, "Northgear sent the wrong item for Wireless earbuds. You can claim $45.00.");
+  assert.equal(both[0]!.text, "Please check your Wireless earbuds from Northgear. The shop's delivery record shows something different from what you ordered. Did you receive something different?");
+  assert.deepEqual(both[0]!.action, { label: "Check your order", href: "#/orders" }, "a possible mix-up is always a question for the owner");
+  assert.doesNotMatch(both[0]!.text, /wrong|sent/i, "the shop is not accused of anything");
   const separate = needsYou(input({ cases: [refund(), refund({ id: "c3", orderId: "o2", itemName: "Daypack", amountCents: 900 })] }));
   assert.equal(separate.length, 2, "different orders show separately");
 });
@@ -64,25 +64,25 @@ test("only open price-drop and wrong-item cases count: refunded, declined and di
 test("no PayPal account matters only when something could be bought, and a paused shopper can be resumed", () => {
   assert.deepEqual(needsYou(input({ paymentSource: "none" })), [], "nothing to buy, so no nagging");
   const blocked = needsYou(input({ paymentSource: "none", requests: [request()] }));
-  assert.deepEqual(kinds(blocked), ["payment", "ready"]);
+  assert.deepEqual(kinds(blocked), ["payment"]);
   assert.deepEqual(blocked[0]!.action, { label: "Connect PayPal", href: "#/wallet" });
   const paused = needsYou(input({ paused: true }));
   assert.deepEqual(kinds(paused), ["paused"]);
   assert.deepEqual(paused[0]!.action, { label: "Resume", run: "resume" });
 });
 
-test("the order is: what blocks buying, then what needs a decision, then refunds, then 'ready'", () => {
+test("the order is: what blocks buying, then what needs a decision, then refunds", () => {
   const items = needsYou(input({
     paused: true, paymentSource: "none",
     requests: [request({ id: "a", ideas: 2 }), request({ id: "b", approval: { itemName: "x", shopName: "y", totalCents: 100 } }), request({ id: "c" })],
     cases: [refund()],
   }));
-  assert.deepEqual(kinds(items), ["payment", "paused", "ideas", "approval", "refund", "ready"]);
+  assert.deepEqual(kinds(items), ["payment", "paused", "ideas", "approval", "refund"]);
 });
 
-test("the tab badge counts decisions, not a request that is merely not bought yet", () => {
+test("the tab badge counts everything that needs attention", () => {
   const items = needsYou(input({ paused: true, requests: [request({ id: "a", ideas: 2 }), request({ id: "c" })], cases: [refund()] }));
-  assert.deepEqual(kinds(items), ["paused", "ideas", "refund", "ready"]);
+  assert.deepEqual(kinds(items), ["paused", "ideas", "refund"]);
   assert.equal(badgeCount(items), 3);
   assert.equal(badgeCount(needsYou(input())), 0);
   assert.equal(badgeCount([]), 0);
@@ -91,11 +91,57 @@ test("the tab badge counts decisions, not a request that is merely not bought ye
 test("nothing points at the page the owner is already on", () => {
   const items = needsYou(input({ requests: [request({ id: "g1", ideas: 2 }), request({ id: "a1", approval: { itemName: "x", shopName: "y", totalCents: 100 } }), request({ id: "z" })], cases: [refund()] }));
   const on = (route: string) => visibleNeeds(items, route).map((i) => i.id);
-  assert.deepEqual(on("#/approve/g1"), ["approval:a1", "refund:c1", "ready:z"], "the ideas page does not announce its own ideas");
-  assert.deepEqual(on("#/orders"), ["ideas:g1", "approval:a1", "ready:z"], "Orders does not announce its own refunds");
+  assert.deepEqual(on("#/approve/g1"), ["approval:a1", "refund:c1"], "the ideas page does not announce its own ideas");
+  assert.deepEqual(on("#/orders"), ["ideas:g1", "approval:a1"], "Orders does not announce its own refunds");
   assert.deepEqual(on("#/"), ["ideas:g1", "approval:a1", "refund:c1"], "Home does not say 'go to my requests'");
   const town = visibleNeeds(items, "#/town");
   assert.equal(town.length, items.length, "the Town still shows everything");
   assert.deepEqual(visibleNeeds(items, "").map((i) => i.id), on("#/"), "an empty route means Home");
   assert.deepEqual(needsYou(input({ paused: true })).length, visibleNeeds(needsYou(input({ paused: true })), "#/wallet").length, "a resume button has no page, so it is always shown");
 });
+
+test("with automatic refunds, a refund on its way is not shown, and one that failed asks the owner to step in", () => {
+  const waiting = needsYou(input({ autoRefund: true, cases: [refund()] }));
+  assert.deepEqual(waiting, [], "the app is already refunding it, so there is nothing for the owner to do");
+  const failed = needsYou(input({ autoRefund: true, cases: [refund({ failure: "PayPal did not complete the refund." })] }));
+  assert.deepEqual(kinds(failed), ["refund"]);
+  assert.equal(failed[0]!.text, "We could not refund $6.00 for Wireless earbuds from Northgear automatically. You can refund it yourself.");
+  assert.deepEqual(failed[0]!.action, { label: "Open Orders", href: "#/orders" });
+  assert.equal(failed[0]!.tone, "warn");
+  // Without automatic refunds the old message stands.
+  assert.equal(needsYou(input({ cases: [refund()] }))[0]!.text, "Northgear dropped its price on Wireless earbuds. You can claim $6.00.");
+});
+
+test("the newest unread notice is shown at the top of the page, with how many more wait, and it opens notifications", () => {
+  const one = needsYou(input({ notices: [notice("n2", "refunded", "Northgear cut its price on Wireless earbuds, so you were refunded $6.00 automatically.")] }));
+  assert.deepEqual(kinds(one), ["notice"]);
+  assert.equal(one[0]!.text, "Northgear cut its price on Wireless earbuds, so you were refunded $6.00 automatically.");
+  assert.equal(one[0]!.tone, "ok");
+  assert.equal(one[0]!.sub, undefined);
+  assert.deepEqual(one[0]!.action, { label: "Open notifications", href: "#/notifications" });
+  const two = needsYou(input({ notices: [notice("n3", "bought", "Bought a thing."), notice("n2", "refunded", "x")] }));
+  assert.equal(two.length, 1, "one line, not one per notice");
+  assert.equal(two[0]!.text, "Bought a thing.");
+  assert.equal(two[0]!.sub, "1 more notification waiting");
+  assert.equal(needsYou(input({ notices: [notice("a", "bought", "1"), notice("b", "bought", "2"), notice("c", "bought", "3")] }))[0]!.sub, "2 more notifications waiting");
+  assert.equal(needsYou(input({ notices: [notice("f", "refund_failed", "We could not refund it.")] }))[0]!.tone, "warn");
+  // On the notifications page itself there is nothing to point at.
+  assert.deepEqual(visibleNeeds(one, "#/notifications"), []);
+  assert.equal(visibleNeeds(one, "#/orders").length, 1);
+});
+
+test("decisions come before notices", () => {
+  const items = needsYou(input({ requests: [request({ id: "a", approval: { itemName: "x", shopName: "y", totalCents: 100 } }), request({ id: "z" })], notices: [notice("n1", "bought", "Bought it.")] }));
+  assert.deepEqual(kinds(items), ["approval", "notice"]);
+  assert.equal(badgeCount(items), 2, "both count for the tab title");
+});
+
+test("with automatic refunds a wrong item is still asked, because only the owner knows what arrived", () => {
+  const items = needsYou(input({ autoRefund: true, cases: [refund({ id: "w", kind: "wrong_item", orderId: "o9", amountCents: 4500 })] }));
+  assert.deepEqual(kinds(items), ["refund"]);
+  assert.equal(items[0]!.text, "Please check your Wireless earbuds from Northgear. The shop's delivery record shows something different from what you ordered. Did you receive something different?");
+  assert.equal(items[0]!.tone, "warn");
+  const both = needsYou(input({ autoRefund: true, cases: [refund({ id: "p", orderId: "o1" }), refund({ id: "w", kind: "wrong_item", orderId: "o9", amountCents: 4500 })] }));
+  assert.deepEqual(both.map((i) => i.id), ["refund:w"], "the price drop on its way is hidden; the question is not");
+});
+

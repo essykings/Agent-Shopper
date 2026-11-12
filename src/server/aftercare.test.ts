@@ -51,7 +51,8 @@ test("a wrong item is owed in full, once the shop has shipped something that is 
     planWrongItem({ paidCents: 4500, refundedCents: 0, shopStatus: "shipped", shippedItem: "Cotton socks, size 8, white", listedName: "Trail socks, 3 pack", ...over });
   const p = wrong();
   assert.deepEqual([p.eligible, p.amountCents], [true, 4500]);
-  assert.match(p.reason, /ordered "Trail socks, 3 pack" but .* sent "Cotton socks, size 8, white"/);
+  assert.equal(p.reason, 'The shop\'s delivery record shows "Cotton socks, size 8, white" for your order of "Trail socks, 3 pack".');
+  assert.doesNotMatch(p.reason, /wrong|sent/i, "the shop is not accused of anything");
   assert.equal(wrong({ shopStatus: "delivered" }).eligible, true);
   assert.equal(wrong({ shopStatus: "received" }).eligible, false, "not shipped yet");
   assert.equal(wrong({ shopStatus: null }).eligible, false);

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, money, when } from "./api";
-import type { CaseRow, OrderRow } from "./api";
+import type { CaseRow, Me, OrderRow } from "./api";
 import { Busy, Intro, Note, Pill, letter, useLoad } from "./ui";
 
 const STATUS: Record<string, { tone: "ok" | "warn" | "bad"; text: string }> = {
@@ -14,7 +14,7 @@ const STATUS: Record<string, { tone: "ok" | "warn" | "bad"; text: string }> = {
 
 const KIND: Record<CaseRow["kind"], { title: string; button: string }> = {
   price_drop: { title: "The price dropped", button: "Refund me the difference" },
-  wrong_item: { title: "The wrong item was sent", button: "Yes, that is what arrived. Refund me" },
+  wrong_item: { title: "Please check your order", button: "Yes, I received something different. Refund me" },
   dispute: { title: "A dispute is open at PayPal", button: "" },
 };
 
@@ -34,8 +34,9 @@ function Evidence({ c }: { c: CaseRow }) {
       {row("What you ordered", `${e.order?.item} from ${e.order?.shop}, paid ${money(e.order?.paidCents ?? 0)} on ${when(String(e.order?.orderedAt))}`)}
       {e.listing && row("What the listing said when it was saved", `${e.listing.name}. ${e.listing.condition ?? ""} Total ${money(e.listing.totalCents ?? 0)}.`)}
       {e.listing && row("Proof the page was not changed since", `fingerprint ${String(e.listing.fingerprint).slice(0, 16)}…, saved ${when(String(e.listing.savedAt))}`)}
-      {e.arrived && row("What the shop's delivery record says arrived", e.arrived.description)}
+      {e.arrived && row("What the shop's delivery record lists", e.arrived.description)}
       {e.order?.promisedBy && row("The shop promised delivery by", e.order.promisedBy)}
+      {e.order?.priceCutPct > 0 && row("The shop's own order record says", `it cut the price of this item by ${e.order.priceCutPct}% after you ordered`)}
       {e.shopPolicy && row("The shop's returns policy", e.shopPolicy.returns)}
       {e.shopPolicy?.priceProtectionDays > 0 && row("The shop's price protection", `${e.shopPolicy.priceProtectionDays} days`)}
       {Array.isArray(e.timeline) && e.timeline.length > 0 && (
@@ -52,7 +53,8 @@ function Evidence({ c }: { c: CaseRow }) {
   );
 }
 
-export function Orders({ refreshMe }: { refreshMe?: () => void }) {
+export function Orders({ refreshMe, me }: { refreshMe?: () => void; me?: Me }) {
+  const auto = me?.autoRefund === true;
   const orders = useLoad(() => api<{ orders: OrderRow[] }>("GET", "/api/orders"));
   const cases = useLoad(() => api<{ cases: CaseRow[] }>("GET", "/api/cases"));
   const [checking, setChecking] = useState(false);
@@ -124,7 +126,7 @@ export function Orders({ refreshMe }: { refreshMe?: () => void }) {
 
   // Two problems on one order claim from the same payment, so what can be claimed is never more than what is left of it.
   const owed = list.reduce((sum, o) => {
-    const claims = found.filter((c) => c.orderId === o.id && c.status === "open" && c.kind !== "dispute").reduce((s, c) => s + c.amountCents, 0);
+    const claims = found.filter((c) => c.orderId === o.id && c.status === "open" && c.kind !== "dispute" && (!auto || c.kind === "price_drop")).reduce((s, c) => s + c.amountCents, 0);
     return sum + Math.min(claims, Math.max(0, o.totalCents - o.refundedCents));
   }, 0);
   const refunded = list.reduce((s, o) => s + o.refundedCents, 0);
@@ -135,13 +137,15 @@ export function Orders({ refreshMe }: { refreshMe?: () => void }) {
         <Intro
           label="Orders"
           title={<>Orders and<br />problems.</>}
-          sub="Everything your shopper has bought. If a price drops or the wrong item arrives, your shopper builds the case and you press the button for the refund."
+          sub={auto
+            ? "Everything your shopper has bought. If a price drops, your shopper refunds you automatically. If a shop's record shows something different from what you ordered, your shopper asks you what arrived."
+            : "Everything your shopper has bought. If a price drops or the wrong item arrives, your shopper builds the case and you press the button for the refund."}
           panel={
             <div className="panel">
               <span className="tag">Your orders</span>
               <div className="figs">
                 <div><div className="fig">{list.length}</div><div className="lab" style={{ marginTop: 6 }}>Orders</div></div>
-                <div><div className="fig">{money(owed)}</div><div className="lab" style={{ marginTop: 6 }}>You can claim</div></div>
+                <div><div className="fig">{money(owed)}</div><div className="lab" style={{ marginTop: 6 }}>{auto ? "Being refunded" : "You can claim"}</div></div>
                 <div><div className="fig">{money(refunded)}</div><div className="lab" style={{ marginTop: 6 }}>Refunded</div></div>
               </div>
               <div className="row" style={{ marginTop: 18 }}>
@@ -158,7 +162,11 @@ export function Orders({ refreshMe }: { refreshMe?: () => void }) {
           {found.length > 0 && (
             <section className="card">
               <h2 className="h2">Problems and refunds</h2>
-              <p className="s" style={{ margin: "6px 0 0" }}>Nothing is refunded until you press the button. The amount is worked out again at that moment, so you cannot be refunded more than you are owed.</p>
+              <p className="s" style={{ margin: "6px 0 0" }}>
+                {auto
+                  ? "Price drops are refunded for you. If a shop's record shows something different from what you ordered, you are asked what arrived and refunded once you say so. Either way the amount is worked out at that moment, so you cannot be refunded more than you are owed."
+                  : "Nothing is refunded until you press the button. The amount is worked out again at that moment, so you cannot be refunded more than you are owed."}
+              </p>
               <div style={{ marginTop: 8 }}>
                 {found.map((c) => {
                   const k = KIND[c.kind];
@@ -183,7 +191,7 @@ export function Orders({ refreshMe }: { refreshMe?: () => void }) {
                         ) : null}
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end" }}>
-                        <Pill tone={st.tone}>{st.text}{c.kind !== "dispute" && c.amountCents ? `, ${money(c.amountCents)}` : ""}</Pill>
+                        <Pill tone={st.tone}>{isOpen && auto && c.kind === "price_drop" ? (c.failure ? "Needs you" : "Refunding") : st.text}{c.kind !== "dispute" && c.amountCents ? `, ${money(c.amountCents)}` : ""}</Pill>
                         <div className="row" style={{ justifyContent: "flex-end" }}>
                           {isOpen && c.kind !== "dispute" && (
                             <button className="btn sm" disabled={working !== null} onClick={() => refund(c)}>
@@ -195,7 +203,7 @@ export function Orders({ refreshMe }: { refreshMe?: () => void }) {
                               {working === `draft-${c.id}` ? <Busy>Writing…</Busy> : drafts[c.id] ?? c.draft ? "Write it again" : "Write the message"}
                             </button>
                           )}
-                          {isOpen && c.kind !== "dispute" && <button className="btn2 sm" disabled={working !== null} onClick={() => decline(c)}>Not now</button>}
+                          {isOpen && c.kind !== "dispute" && <button className="btn2 sm" disabled={working !== null} onClick={() => decline(c)}>{c.kind === "wrong_item" ? "No, it is what I ordered" : "Not now"}</button>}
                         </div>
                       </div>
                     </div>

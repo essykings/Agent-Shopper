@@ -7,7 +7,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
 import { evaluate } from "../server/guard.ts";
 import type { Emit, PageKind } from "../shared/events.ts";
-import { searchLadder } from "../shared/words.ts";
+import { headNoun, keywords, searchLadder } from "../shared/words.ts";
 import type { Claim, GiftGoal, GuardContext, GuardResult, Mandate, Proposal } from "../shared/types.ts";
 import { money } from "../shops/pages.ts";
 import { detectInjection, extractLinks, parseAbout, parseProduct } from "./pages.ts";
@@ -73,7 +73,7 @@ export type ShopperOutcome =
   | { status: "proposed"; proposal: Proposal; guard: GuardResult; reasoning: string }
   /** Gift requests: up to three ideas, none of them bought. The owner chooses. */
   | { status: "shortlist"; picks: Pick[]; summary: string }
-  | { status: "gave_up"; reason: string; /** The searches it tried, for the owner to see. */ tried?: string[] }
+  | { status: "gave_up"; reason: string; /** The searches it tried, for the owner to see. */ tried?: string[]; /** The cheapest item it opened that really is the item, from a shop the owner can trust, but over the price limit. */ closest?: { itemName: string; shopId: string; totalCents: number } }
   | { status: "refused" }
   | { status: "step_limit" }
   | { status: "token_limit" }
@@ -157,12 +157,12 @@ function buildTools(shopIds: string[], gift = false): Anthropic.Tool[] {
       name: "give_up",
       description: gift
         ? "Use this when no gift on the shops fits the owner's rules. If you already have ideas that were accepted, use finish_picks instead. Say why in plain words."
-        : "Use this when no listing on the shops meets the owner's rules. Say why in plain words.",
+        : "Use this when no listing on the shops meets the owner's rules. Say why in plain words. If the item itself exists but only above the owner's price, put the address of its product page in closest_page, so the owner can be offered a higher limit. Otherwise use an empty string.",
       strict: true,
       input_schema: {
         type: "object",
-        properties: { reason: { type: "string" } },
-        required: ["reason"],
+        properties: { reason: { type: "string" }, closest_page: { type: "string" } },
+        required: ["reason", "closest_page"],
         additionalProperties: false,
       },
     },
@@ -204,6 +204,9 @@ How to work:
 - Each shop sells about 100 products in 16 departments. Search it at its address plus /search?q=words (for example /search?q=wireless+earbuds). /search?category=electronics lists one department. Results come 12 to a page: add &page=2 for more, and &sort=price for the cheapest first. Search every shop first, then open the product pages that match.
 - If a search finds nothing, do not give up. Search again with fewer or simpler words: drop words like "for", and the use or the brand, so "water bottle for hiking" becomes "water bottle", then "bottle". Shops often name things more simply than people do. Try at least ${MIN_SEARCHES} different searches, in every shop, before you call give_up: it is refused until you have.
 - Every page you open comes with its links. Product addresses cannot be guessed, so open a product only by the exact address from the links list. You can only propose from a product's own page, never from a search page.
+- When you call give_up, write the reason in one or two short sentences that are easy to scan: say what you found and why it did not fit, for example "The cheapest trusted tent is $128.00 at Trailhead, $28.00 over the $100.00 limit. Deal-Zone is cheaper, but its trust score is 0." Do not list the searches you made. If the item itself is on sale but only above the owner's price, also give the address of its product page in closest_page.
+- The owner's price is a ceiling, not a target. Choose the cheapest listing that really is the item; do not spend more just because the limit allows it.
+- Buy the item itself, never an accessory or a part for it. A laptop sleeve, stand or bag is not a laptop. If the item itself is not on sale at or under the owner's price, call give_up and say so, rather than buying something else.
 - Look at every shop that might sell the item, open the product pages, and compare the real total price (shown as "Total") and the arrival date.
 - Run check_seller on every shop you consider. A cheap price from a shop with a low score is a trap, not a deal.
 - You cannot buy anything. A separate system checks your proposal against their rules and decides. If it turns your proposal down you will be told why: try another listing, or call give_up if none fits.
@@ -504,7 +507,46 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
   const searchedShops = new Set<string>();
   let giveUpRefusals = 0;
 
-  function giveUp(args: Record<string, unknown>): ToolOut {
+  /**
+   * If nothing could be bought only because it cost too much, the cheapest real match from a shop the owner can trust.
+   * Worked out from the pages the shopper opened, by code, so a screen can offer "raise the limit" without trusting words.
+   */
+  async function closestOverLimit(namedPage: string): Promise<{ itemName: string; shopId: string; totalCents: number } | undefined> {
+    const wanted = new Set(keywords(mandate.item));
+    let best: { itemName: string; shopId: string; totalCents: number } | undefined;
+    const trusted = new Map<string, boolean>();
+    // The pages it opened, and the one it named (it may have seen the listing only on a search page). The named page is read
+    // again here, by code, and has to pass the same checks: only a page on one of the shops can be read at all.
+    const candidates: Array<FetchedPage & { shopId: string | null }> = [...pages.values()];
+    if (namedPage && shopAt(namedPage)) {
+      try {
+        const fetched = await deps.fetchPage(namedPage);
+        if (fetched.status === 200) candidates.push({ ...fetched, shopId: shopIdFor(fetched.url) });
+      } catch {
+        // A page that cannot be read offers nothing.
+      }
+    }
+    for (const page of candidates) {
+      const shop = shops.find((s) => s.id === page.shopId);
+      const p = shop ? parseProduct(page) : null;
+      if (!shop || !p || p.totalCents === null || p.totalCents <= mandate.maxPriceCents) continue;
+      if (!wanted.has(headNoun(p.name))) continue;
+      if (p.category && mandate.neverBuyCategories.some((c) => c.toLowerCase() === p.category!.toLowerCase())) continue;
+      if (mandate.condition === "new" && !/\b(new|sealed)\b/i.test(p.condition ?? "")) continue;
+      if (!trusted.has(shop.id)) {
+        try {
+          trusted.set(shop.id, (await reportFor(shop)).score >= mandate.sellerMinScore);
+        } catch {
+          trusted.set(shop.id, false);
+        }
+      }
+      if (!trusted.get(shop.id)) continue;
+      if (!best || p.totalCents < best.totalCents) best = { itemName: p.name, shopId: shop.id, totalCents: p.totalCents };
+    }
+    return best;
+  }
+
+  async function giveUp(args: Record<string, unknown>): Promise<ToolOut> {
     const reason = str(args["reason"]) || "No reason given.";
     const minSearches = deps.minSearches ?? MIN_SEARCHES;
     const neverFound = !gift && rejections.length === 0 && minSearches > 0;
@@ -524,7 +566,8 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
       actions.push({ tool: "finish_picks", summary: `Put forward ${picks.length} gift idea${picks.length === 1 ? "" : "s"}`, ok: true });
       return ok({ acknowledged: true });
     }
-    outcome = { status: "gave_up", reason, ...(searches.size ? { tried: [...searches] } : {}) };
+    const closest = gift ? undefined : await closestOverLimit(str(args["closest_page"]));
+    outcome = { status: "gave_up", reason, ...(searches.size ? { tried: [...searches] } : {}), ...(closest ? { closest } : {}) };
     actions.push({ tool: "give_up", summary: `Gave up: ${reason}`, ok: true });
     emit({ type: "giveup", reason });
     return ok({ acknowledged: true });
@@ -598,7 +641,7 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
         else if (block.name === "open_page") out = await openPage(args);
         else if (block.name === "check_seller") out = await checkSeller(args);
         else if (block.name === "propose_purchase") out = await proposePurchase(args);
-        else if (block.name === "give_up") out = giveUp(args);
+        else if (block.name === "give_up") out = await giveUp(args);
         else if (block.name === "finish_picks") out = finishPicks(args);
         else out = fail(`There is no tool called ${block.name}.`);
       } catch (err) {

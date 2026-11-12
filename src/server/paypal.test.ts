@@ -400,3 +400,52 @@ test("a webhook is never believed without a webhook id, without every header, or
   const down = createPayPalClient({ clientId: "id", clientSecret: "secret", baseUrl: "http://127.0.0.1:1", webhookId: "W", timeoutMs: 500 });
   assert.equal(await down.verifyWebhook({ headers, rawBody: "{}" }), false);
 });
+
+// ---------- a passing network failure while asking for the access token ----------
+
+/** A server that cuts the connection the first `drops` times it is asked, then answers: a token, or a 404 for anything else. */
+async function flaky(drops: number, tokenReply: { status: number; json: unknown } = { status: 200, json: { access_token: "T", expires_in: 300 } }) {
+  const hits: string[] = [];
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      hits.push(req.url!);
+      if (hits.length <= drops) return req.socket.destroy(); // no answer at all: what "fetch failed" is
+      const isToken = req.url!.includes("oauth2/token");
+      res.writeHead(isToken ? tokenReply.status : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(isToken ? tokenReply.json : { name: "NOT_FOUND" }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const { port } = server.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}`, hits, close: () => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }) };
+}
+
+test("asking for the access token is tried again after a passing network failure, and the purchase carries on", async () => {
+  const s = await flaky(2);
+  try {
+    // The token arrives on the third try, so the call goes on to the real request (which this stub answers with a 404).
+    await assert.rejects(client(s.url, { retryDelayMs: 5 }).capture({ authorizationId: "A1", requestId: "c" }), /HTTP 404/);
+    assert.equal(s.hits.filter((u) => u.includes("oauth2/token")).length, 3, "two failures, then success");
+  } finally {
+    await s.close();
+  }
+});
+
+test("if PayPal cannot be reached at all, it stops after the tries with the name of the step, and an answer from PayPal is never retried", async () => {
+  const down = await flaky(99);
+  try {
+    await assert.rejects(client(down.url, { retryDelayMs: 5, tokenRetries: 2 }).capture({ authorizationId: "A1", requestId: "c" }), /Get access token failed/);
+    assert.equal(down.hits.length, 3, "one try and two retries, no more");
+  } finally {
+    await down.close();
+  }
+  const refused = await flaky(0, { status: 401, json: { error: "invalid_client", error_description: "Client Authentication failed" } });
+  try {
+    await assert.rejects(client(refused.url, { retryDelayMs: 5 }).capture({ authorizationId: "A1", requestId: "c" }), /HTTP 401 invalid_client/);
+    assert.equal(refused.hits.length, 1, "PayPal answered, so there is nothing to retry");
+  } finally {
+    await refused.close();
+  }
+});
+

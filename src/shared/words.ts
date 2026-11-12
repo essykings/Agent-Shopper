@@ -28,3 +28,9 @@ export function searchLadder(item: string): string[] {
   for (let n = words.length; n >= 1; n--) ladder.push(words.slice(0, n).join(" "));
   return [...new Set(ladder.filter(Boolean))].slice(0, 5);
 }
+
+/** What a product is, from its name: the last word before the first comma ("Laptop sleeve, 14 inch" is a sleeve, "Laptop, 14 inch" is a laptop). */
+export function headNoun(name: string): string {
+  return keywords(name.split(",")[0]!).at(-1) ?? "";
+}
+

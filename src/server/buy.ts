@@ -13,6 +13,8 @@ import { dbStore } from "../agent/store.ts";
 import type { Emit, WorldEvent } from "../shared/events.ts";
 import type { Claim, Proposal, SellerStatus } from "../shared/types.ts";
 import { SHOPS } from "../shops/catalog.ts";
+import { money } from "../shops/pages.ts";
+import { notify } from "./notifications.ts";
 import { receiveOrder } from "../shops/service.ts";
 import type { Pool } from "./db.ts";
 import { loadMandate, purchase } from "./payments.ts";
@@ -100,6 +102,14 @@ function purchaseDeps(pool: Pool, deps: BuyDeps, url: string): PurchaseDeps {
     getSellerStatus: async (_userId, shopId) => sellerStatusOf(shopId),
     // The shop learns about the paid order, so it can ship (or misbehave, in the demo).
     afterCapture: async (info) => {
+      // Tell the owner what was bought. A problem telling them must never stop the shop learning about the order.
+      try {
+        const shop = SHOPS.find((s) => s.id === info.shopId);
+        const itemName = shop?.products.find((p) => p.key === info.itemKey)?.name ?? "your item";
+        await notify(pool, { userId: info.userId, kind: "bought", text: `Bought ${itemName} for ${money(info.totalCents)} from ${shop?.name ?? "the shop"}.`, href: "#/orders", key: `order:${info.orderId}:bought` });
+      } catch {
+        // Not important enough to stop anything.
+      }
       await receiveOrder(pool, { orderId: info.orderId, shopId: info.shopId, itemKey: info.itemKey, now: now() });
     },
     ...(deps.now ? { now: deps.now } : {}),

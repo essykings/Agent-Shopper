@@ -306,6 +306,8 @@ export interface OrderView {
   itemName: string;
   status: "received" | "shipped" | "delivered";
   promisedBy: string;
+  /** A price cut given to this order after it was placed, as a percent. */
+  priceCutPct?: number;
 }
 
 export function renderOrder(shop: ShopDef, o: OrderView): string {
@@ -316,7 +318,7 @@ export function renderOrder(shop: ShopDef, o: OrderView): string {
 <dt>Item</dt><dd>${escapeHtml(o.itemName)}</dd>
 <dt>Status</dt><dd><span class="badge">${label}</span></dd>
 <dt>Promised by</dt><dd>${formatDate(o.promisedBy)}</dd>
-<dt>Tracking number</dt><dd>TRK-${escapeHtml(o.orderId.slice(0, 8).toUpperCase())}</dd>
+<dt>Tracking number</dt><dd>TRK-${escapeHtml(o.orderId.slice(0, 8).toUpperCase())}</dd>${o.priceCutPct ? `\n<dt>Price update</dt><dd>We cut the price of this item by ${o.priceCutPct}% after you ordered it.</dd>` : ""}
 </dl></div>`;
   return layout(shop, "Your order", body);
 }

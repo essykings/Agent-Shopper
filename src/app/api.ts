@@ -18,6 +18,9 @@ import { guardedApproveAndBuy, guardedProposeAndBuy } from "../server/guarded.ts
 import { Hub } from "./hub.ts";
 import { checkOrders, declineCase, draftMessage, listCases, loadCase, refundCase, saveDraft } from "../server/aftercare.ts";
 import type { AftercareDeps } from "../server/aftercare.ts";
+import { refundOpenCases } from "../server/aftercare-auto.ts";
+import { giveUpBody } from "../shared/messages.ts";
+import { listNotices, markAllRead, notify } from "../server/notifications.ts";
 import { handleWebhook } from "../server/webhooks.ts";
 import { costMicroUsd, worstCaseMicroUsd } from "../agent/pricing.ts";
 import { DEFAULT_MODEL } from "../agent/shopper.ts";
@@ -33,6 +36,12 @@ import { SHOPS } from "../shops/catalog.ts";
 import { escapeHtml, pageText, renderAbout } from "../shops/pages.ts";
 import { SESSION_SECONDS, signSession, verifySession } from "./session.ts";
 
+/** What a request gets when it does not say. */
+const DEFAULT_MIN_SCORE = 70;
+const DEFAULT_NEVER_BUY = ["gift cards", "crypto", "alcohol"];
+/** The most one request may be: the most an allowance can be set to. What really limits a request is the allowance that is free. */
+const MAX_REQUEST_CENTS = 100_000;
+
 export interface AppDeps {
   buy: BuyDeps;
   limits: Limits;
@@ -43,6 +52,12 @@ export interface AppDeps {
   demoVaultId: string;
   /** Where this app is reached from, such as https://agent-shopper.onrender.com. PayPal sends people back here. */
   publicUrl: string;
+  /** Refund price drops and wrong items as soon as they are found, instead of waiting for the owner to press the button. */
+  autoRefund?: boolean;
+  /** Seconds after a demo account's purchase that the shop's scripted event happens. Unset or 0: no scripted events. */
+  demoEventSeconds?: number;
+  /** How long a request waits for its turn when another run is going, before it gives up with "a run is already in progress" (default 90). */
+  queueWaitSeconds?: number;
   /** Where live agent events go. Tests pass their own. */
   hub?: Hub;
   /** If set (at least 16 characters), GET /api/diag/ip answers to someone who knows it. Used once, after deploying, to set TRUSTED_PROXY_HOPS. */
@@ -61,7 +76,7 @@ class HttpError extends Error {
   }
 }
 
-const DEMO_ALLOWANCE_CENTS = 50_000;
+const DEMO_ALLOWANCE_CENTS = 100_000;
 const COOKIE = "sid";
 type Vars = { Variables: { userId: string } };
 
@@ -165,6 +180,16 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     }
     if (err instanceof MandateNotActiveError) return c.json({ error: err.message }, 409);
     if (err instanceof Error && /^(Request|Proposal) not found/.test(err.message)) return c.json({ error: err.message }, 404);
+    // The AI service answered with an error of its own. Say what it means for the person, and keep its words in the log.
+    const upstream = err instanceof Error ? (err as Error & { status?: unknown }).status : undefined;
+    if (upstream === 401 || upstream === 403) {
+      console.error("The AI service refused the app's key. Check ANTHROPIC_API_KEY, then restart the app:", err instanceof Error ? err.message : err);
+      return c.json({ error: "The shopper is unavailable right now, so nothing was bought. The app's AI key needs checking." }, 503);
+    }
+    if (upstream === 429 || upstream === 500 || upstream === 502 || upstream === 503 || upstream === 529) {
+      console.error("The AI service is busy or down:", err instanceof Error ? err.message : err);
+      return c.json({ error: "The AI service is busy right now, so nothing was bought. Try again in a moment." }, 503);
+    }
     console.error("Unexpected error:", err instanceof Error ? err.message : err);
     return c.json({ error: "Something went wrong. Try again in a moment." }, 500);
   });
@@ -216,7 +241,10 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
       pool.query<{ paypal_source: "demo" | "own" | "none"; paypal_email: string | null }>("select paypal_source, paypal_email from users where id = $1", [userId]),
     ]);
     const p = payment.rows[0]!;
-    return c.json({ balances, paused: account.rows[0]!.paused, mock: deps.mock, runsPerDay: deps.limits.ipRunsPerDay, payment: { source: p.paypal_source, email: p.paypal_email } });
+    return c.json({
+      balances, paused: account.rows[0]!.paused, mock: deps.mock, runsPerDay: deps.limits.ipRunsPerDay, payment: { source: p.paypal_source, email: p.paypal_email },
+      autoRefund: deps.autoRefund === true,
+    });
   });
 
   app.post("/api/pause", needUser, async (c) => {
@@ -340,10 +368,13 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     return { ...p, itemName: shop?.products.find((x) => x.key === p["item_key"])?.name ?? p["item_key"], shopName: shop?.name ?? p["shop_id"] };
   };
 
+  // Requests whose run is going (or waiting its turn) right now, so a reloaded page still says so.
+  const working = new Set<string>();
+
   app.get("/api/requests", needUser, async (c) => {
     const res = await pool.query(
       `select m.id, m.item, m.condition, m.max_price_cents, m.ask_above_cents, to_char(m.deadline, 'YYYY-MM-DD') as deadline,
-              m.seller_min_score, m.never_buy, m.set_aside_cents, m.status, m.created_at, m.kind, m.goal,
+              m.seller_min_score, m.never_buy, m.set_aside_cents, m.status, m.created_at, m.kind, m.goal, m.closed_outcome,
               (select coalesce(json_agg(row_to_json(p) order by p.created_at), '[]'::json) from (
                  select id, shop_id, item_key, total_cents, decision, checks, reasoning, seller_score, created_at, to_char(delivery_by, 'YYYY-MM-DD') as delivery_by
                  from proposals where mandate_id = m.id
@@ -360,7 +391,7 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
       requests: res.rows.map((r) => ({
         id: r.id, item: r.item, condition: r.condition, maxPriceCents: r.max_price_cents, askAboveCents: r.ask_above_cents,
         deadline: r.deadline, sellerMinScore: r.seller_min_score, neverBuy: r.never_buy, setAsideCents: r.set_aside_cents,
-        status: r.status, createdAt: r.created_at, kind: r.kind, goal: r.goal,
+        status: r.status, createdAt: r.created_at, kind: r.kind, goal: r.goal, closedOutcome: r.closed_outcome ?? null, working: working.has(r.id),
         proposal: r.proposal ? named(r.proposal) : null, proposals: (r.proposals as Array<Record<string, any>>).map(named), order: r.order,
       })),
     });
@@ -371,19 +402,19 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     const gift = b["kind"] === "gift";
     // Gift requests are switched off for now (set ENABLE_GIFTS=1 to bring them back). The code stays.
     if (gift && process.env["ENABLE_GIFTS"] !== "1") throw new HttpError(400, "Gift requests are not available right now.");
-    const maxPriceCents = int(b["maxPriceCents"], "The price limit", 100, 50_000);
+    const maxPriceCents = int(b["maxPriceCents"], "The price limit", 100, MAX_REQUEST_CENTS);
     // The price is the only limit. Within it the shopper buys without asking, so the ask-me limit equals the price
     // unless an older client still sends its own. A gift is always the owner's choice and has no separate limit.
     const askAboveCents = gift || b["askAboveCents"] === undefined ? maxPriceCents : int(b["askAboveCents"], "The ask-me limit", 100, maxPriceCents);
     // Everything else has a sensible default, so a request is just "what" and "how much".
-    const sellerMinScore = b["sellerMinScore"] === undefined ? 70 : int(b["sellerMinScore"], "The minimum shop score", 0, 100);
+    const sellerMinScore = b["sellerMinScore"] === undefined ? DEFAULT_MIN_SCORE : int(b["sellerMinScore"], "The minimum shop score", 0, 100);
     const condition = b["condition"] === "any" ? "any" : "new";
     const deadline = b["deadline"] === undefined ? new Date(now().getTime() + 30 * 86_400_000).toISOString().slice(0, 10) : str(b["deadline"], "The deadline", 10, 10);
     const when = Date.parse(`${deadline}T00:00:00Z`);
     if (Number.isNaN(when) || when < now().getTime() - 86_400_000 || when > now().getTime() + 400 * 86_400_000) {
       throw new HttpError(400, "The deadline must be a date within the next year.");
     }
-    const rawBanned = b["neverBuy"] === undefined ? ["gift cards", "crypto", "alcohol"] : Array.isArray(b["neverBuy"]) ? b["neverBuy"] : [];
+    const rawBanned = b["neverBuy"] === undefined ? DEFAULT_NEVER_BUY : Array.isArray(b["neverBuy"]) ? b["neverBuy"] : [];
     if (rawBanned.length > 10) throw new HttpError(400, "Ban at most 10 categories.");
     const neverBuy = rawBanned.map((x) => str(x, "A banned category", 1, 30).toLowerCase());
 
@@ -438,15 +469,41 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     const mandateId = idOf(c);
     const item = (await pool.query<{ item: string }>("select item from mandates where id = $1 and user_id = $2", [mandateId, userId])).rows[0]?.item;
     live.emit({ type: "start", ...(item ? { item } : {}) });
+    working.add(mandateId);
     let r;
     try {
-      r = await guardedProposeAndBuy(pool, { ...deps.buy, limits: deps.limits, onEvent: live.emit }, { userId, mandateId, shops: deps.shops, ip: ipOf(c) });
+      // Several requests at once take their turns, one after another, instead of the later ones failing: the shopper does
+      // them in the order they come, waiting (up to a limit) while another run is going.
+      const giveUpWaitingAt = Date.now() + (deps.queueWaitSeconds ?? 90) * 1000;
+      for (;;) {
+        try {
+          r = await guardedProposeAndBuy(pool, { ...deps.buy, limits: deps.limits, onEvent: live.emit }, { userId, mandateId, shops: deps.shops, ip: ipOf(c) });
+          break;
+        } catch (err) {
+          if (err instanceof LimitError && err.code === "busy" && Date.now() < giveUpWaitingAt) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            continue;
+          }
+          throw err;
+        }
+      }
     } catch (err) {
       live.emit({ type: "end", result: "stopped" });
       throw err;
+    } finally {
+      working.delete(mandateId);
     }
     const run = { actions: r.run.actions, rejections: r.run.rejections, steps: r.run.steps };
-    if (r.stage === "agent") return c.json({ stage: "agent", outcome: r.outcome, ...run });
+    if (r.stage === "agent" && r.outcome.status === "gave_up") {
+      // The shopper has decided there is nothing to buy: the request is closed, its held money is freed, and what it said is kept.
+      const closed = await pool.query<{ set_aside_cents: number }>(
+        "update mandates set status = 'expired', closed_outcome = $3 where id = $1 and user_id = $2 and status = 'active' returning set_aside_cents",
+        [mandateId, userId, JSON.stringify({ reason: r.outcome.reason, tried: r.outcome.tried ?? [], closest: r.outcome.closest ?? null })],
+      );
+      if (closed.rows[0]) await appendLedger(pool, { userId, mandateId, kind: "set_aside_release", amountCents: closed.rows[0].set_aside_cents });
+      await notify(pool, { userId, kind: "not_found", text: `Nothing was bought for "${item ?? "that"}". ${giveUpBody(r.outcome)}`, href: "#/", key: `run:${mandateId}` });
+    }
+    if (r.stage === "agent") return c.json({ stage: "agent", outcome: r.outcome, closed: r.outcome.status === "gave_up", ...run });
     if (r.stage === "shortlist") return c.json({ stage: "shortlist", picks: r.picks, summary: r.summary, ...run });
     if (r.stage === "owner") return c.json({ stage: "owner", proposalId: r.proposalId, totalCents: r.totalCents, ...run });
     return c.json({ stage: "purchase", proposalId: r.proposalId, result: r.result, ...run });
@@ -546,7 +603,24 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
   // Looks at the person's paid orders for a price drop or a wrong item, and opens or updates cases. Nothing is refunded here.
   app.post("/api/aftercare/check", needUser, async (c) => {
     await body(c);
-    return c.json({ cases: (await checkOrders(pool, aftercare(), c.get("userId"))).map(caseJson) });
+    const userId = c.get("userId");
+    await checkOrders(pool, aftercare(), userId);
+    // With automatic refunds on, what is owed is refunded right now, without a button.
+    if (deps.autoRefund) await refundOpenCases(pool, aftercare(), { userId });
+    return c.json({ cases: (await listCases(pool, userId)).map(caseJson) });
+  });
+
+  // ---------- notifications ----------
+
+  app.get("/api/notifications", needUser, async (c) => {
+    c.header("Cache-Control", "no-store");
+    return c.json(await listNotices(pool, c.get("userId")));
+  });
+
+  app.post("/api/notifications/read", needUser, async (c) => {
+    await body(c);
+    await markAllRead(pool, c.get("userId"));
+    return c.json({ ok: true });
   });
 
   // The owner presses "refund me". They name no amount: the rules work it out again right now.

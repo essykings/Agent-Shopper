@@ -41,6 +41,16 @@ export interface Me {
   runsPerDay: number;
   /** Where the money comes from: the shared demo buyer, the person's own PayPal, or nothing yet. */
   payment: { source: "demo" | "own" | "none"; email: string | null };
+  /** Refunds are made automatically. */
+  autoRefund: boolean;
+}
+export interface Notice {
+  id: string;
+  kind: "bought" | "refunded" | "refund_failed" | "not_found" | "question";
+  text: string;
+  href: string | null;
+  createdAt: string;
+  read: boolean;
 }
 export interface Shop {
   id: string;
@@ -90,6 +100,10 @@ export interface RequestRow {
   /** For gifts: the ideas from the latest run. */
   proposals: Proposal[];
   order: { id: string; status: string; total_cents: number; shop_id: string } | null;
+  /** The shopper's own run is going, or waiting its turn, right now. */
+  working: boolean;
+  /** For a request the shopper gave up on (status "expired"): what it said, what it searched for, and the closest option over the limit. */
+  closedOutcome: { reason?: string; tried?: string[]; closest?: { itemName: string; shopId: string; totalCents: number } | null } | null;
 }
 export interface OrderRow {
   id: string;
@@ -133,7 +147,7 @@ export interface RunResult {
   stage: "agent" | "owner" | "purchase" | "shortlist";
   picks?: Array<{ proposalId: string; totalCents: number }>;
   summary?: string;
-  outcome?: { status: string; reason?: string; message?: string; tried?: string[] };
+  outcome?: { status: string; reason?: string; message?: string; tried?: string[]; closest?: { itemName: string; shopId: string; totalCents: number } };
   proposalId?: string;
   totalCents?: number;
   result?: { status: string; reason?: string; detail?: string; checks?: Check[] };

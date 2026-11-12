@@ -4,6 +4,8 @@ import type { Me } from "./api";
 import { Approve } from "./Approve";
 import { Home } from "./Home";
 import { NewRequest } from "./NewRequest";
+import type { NewPrefill } from "./NewRequest";
+import { Notifications } from "./Notifications";
 import { Orders } from "./Orders";
 import { Playground, PublicTown, TownSquare } from "./Town";
 import { MiniTown } from "./MiniTown";
@@ -62,7 +64,7 @@ function Landing({ onDone }: { onDone: (problem?: string) => void }) {
             </div>
             <span className="tag">Try it</span>
             <p style={{ margin: "14px 0 18px", fontSize: 16, lineHeight: 1.5 }}>
-              You get a demo account with a $500 allowance and three pretend shops: an honest one, a scam one, and a flexible one. Payments use the PayPal sandbox, so no real money moves.
+              You get a demo account with a $1,000 allowance and three pretend shops: an honest one, a scam one, and a flexible one. Payments use the PayPal sandbox, so no real money moves.
             </p>
             <button className="btn" onClick={() => start(false)} disabled={working !== null} style={{ width: "100%" }}>
               {working === "demo" ? <Busy>Setting up…</Busy> : "Try the demo"}
@@ -95,6 +97,7 @@ export function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [startId, setStartId] = useState<string | null>(null);
+  const [prefill, setPrefill] = useState<NewPrefill | null>(null);
   const [version, setVersion] = useState(0);
   const [note, setNote] = useState<{ tone: "ok" | "err" | "warn"; text: string } | null>(() => {
     const code = new URLSearchParams(window.location.search).get("connect");
@@ -169,7 +172,7 @@ export function App() {
   }
 
   const approve = /^#\/approve\/(.+)$/.exec(route)?.[1];
-  const page = route.startsWith("#/playground") ? "playground" : route.startsWith("#/town") ? "town" : route.startsWith("#/shops") ? "shops" : route.startsWith("#/wallet") ? "wallet" : route.startsWith("#/orders") ? "orders" : "home";
+  const page = route.startsWith("#/playground") ? "playground" : route.startsWith("#/town") ? "town" : route.startsWith("#/shops") ? "shops" : route.startsWith("#/wallet") ? "wallet" : route.startsWith("#/orders") ? "orders" : route.startsWith("#/notifications") ? "notifications" : "home";
   const link = (to: string, label: string, key: string) => (
     <a href={to} className={page === key && !approve ? "on" : ""} aria-current={page === key && !approve ? "page" : undefined}>{label}</a>
   );
@@ -183,7 +186,11 @@ export function App() {
           <a className="logo" href="#/"><span className="lg">A</span>Agent Shopper</a>
           <nav className="links" aria-label="Main">{link("#/", "Home", "home")}{link("#/playground", "Playground", "playground")}<a href="#/town" className={page === "town" && !approve ? "on" : ""} aria-current={page === "town" && !approve ? "page" : undefined}>Town{shopping > 0 && <span className="live" aria-label={`${shopping} shopper${shopping === 1 ? "" : "s"} working now`}><i aria-hidden="true" />{shopping}</span>}</a>{link("#/shops", "Shops", "shops")}{link("#/wallet", "Wallet", "wallet")}{link("#/orders", "Orders", "orders")}</nav>
           <div className="navr">
-            <button className="btn sm" onClick={() => setShowNew(true)}>New request</button>
+            <a className={`btn2 sm bell${page === "notifications" ? " on" : ""}`} href="#/notifications" aria-label={needs.unread > 0 ? `Notifications, ${needs.unread} new` : "Notifications"}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0" /></svg>
+              {needs.unread > 0 && <span className="bellcount">{needs.unread > 9 ? "9+" : needs.unread}</span>}
+            </a>
+            <button className="btn sm" onClick={() => { setPrefill(null); setShowNew(true); }}>New request</button>
             <button className="btn2 sm" onClick={togglePause}>{me.paused ? "Resume" : "Pause all"}</button>
             <button className="btn2 sm" onClick={signOut}>Sign out</button>
           </div>
@@ -200,9 +207,10 @@ export function App() {
         : page === "town" ? <TownSquare signedIn />
         : page === "shops" ? <Shops minScore={70} />
         : page === "wallet" ? <Wallet me={me} refreshMe={refreshMe} />
-        : page === "orders" ? <Orders refreshMe={refreshMe} />
-        : <Home me={me} refreshMe={refreshMe} onNew={() => setShowNew(true)} startId={startId} onStarted={() => setStartId(null)} />}
-      {showNew && <NewRequest onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); setStartId(id); window.location.hash = "#/"; setVersion((v) => v + 1); void refreshMe(); }} />}
+        : page === "orders" ? <Orders refreshMe={refreshMe} me={me} />
+        : page === "notifications" ? <Notifications />
+        : <Home me={me} refreshMe={refreshMe} onNew={(p) => { setPrefill(p ?? null); setShowNew(true); }} startId={startId} onStarted={() => setStartId(null)} />}
+      {showNew && <NewRequest initial={prefill} onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); setStartId(id); window.location.hash = "#/"; void refreshMe(); }} />}
     </div>
   );
 }
