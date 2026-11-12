@@ -11,3 +11,6 @@ web/dist/
 *.log
 .DS_Store
 .claude/settings.local.json
+
+# the demo video's recordings and voice clips
+video/

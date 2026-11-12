@@ -547,7 +547,12 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
   }
 
   async function giveUp(args: Record<string, unknown>): Promise<ToolOut> {
-    const reason = str(args["reason"]) || "No reason given.";
+    // A model can slip its own tool markup into a text argument, for example `...not a laptop.</reason> <parameter name="closest_page">/shops/...`.
+    // Keep only the words before it, and use the address it carried when closest_page came empty.
+    const rawReason = str(args["reason"]);
+    const markup = rawReason.search(/<\/?[a-z_]+[^>]*>/i);
+    const reason = (markup >= 0 ? rawReason.slice(0, markup) : rawReason).trim() || "No reason given.";
+    const carried = markup >= 0 ? rawReason.slice(markup).match(/https?:\/\/[^\s"'<>]+/)?.[0] : undefined;
     const minSearches = deps.minSearches ?? MIN_SEARCHES;
     const neverFound = !gift && rejections.length === 0 && minSearches > 0;
     const unsearched = shops.filter((s) => !searchedShops.has(s.id)).map((s) => s.id);
@@ -566,7 +571,7 @@ export async function runShopperAgent(deps: ShopperDeps, input: ShopperInput): P
       actions.push({ tool: "finish_picks", summary: `Put forward ${picks.length} gift idea${picks.length === 1 ? "" : "s"}`, ok: true });
       return ok({ acknowledged: true });
     }
-    const closest = gift ? undefined : await closestOverLimit(str(args["closest_page"]));
+    const closest = gift ? undefined : await closestOverLimit(str(args["closest_page"]) || carried || "");
     outcome = { status: "gave_up", reason, ...(searches.size ? { tried: [...searches] } : {}), ...(closest ? { closest } : {}) };
     actions.push({ tool: "give_up", summary: `Gave up: ${reason}`, ok: true });
     emit({ type: "giveup", reason });

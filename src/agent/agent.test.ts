@@ -440,6 +440,10 @@ test("giving up, refusing, stopping without a decision and running out of steps 
   const gave = await runShopperAgent(arena().base(scripted([() => reply([use("a", "give_up", { reason: "Nothing fits." })])])), { mandate, shops: REFS });
   assert.deepEqual(gave.outcome, { status: "gave_up", reason: "Nothing fits." });
 
+  // Tool markup that slipped into the reason (seen on the live site) never reaches the owner.
+  const leaky = await runShopperAgent(arena().base(scripted([() => reply([use("a", "give_up", { reason: "Nothing fits, it is a tablet.</reason> <parameter name=\"closest_page\">https://nowhere.invalid/x" })])])), { mandate, shops: REFS });
+  assert.deepEqual(leaky.outcome, { status: "gave_up", reason: "Nothing fits, it is a tablet." });
+
   const refused = await runShopperAgent(arena().base(scripted([() => reply([], "refusal")])), { mandate, shops: REFS });
   assert.deepEqual(refused.outcome, { status: "refused" });
 
