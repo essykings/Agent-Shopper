@@ -8,7 +8,7 @@ import { CHANGED, holdUpdates } from "./needs";
 import { Busy, Intro, Note, Pill, letter, useLoad } from "./ui";
 import type { CaseRow } from "./api";
 
-type GaveUp = { reason?: string; tried?: string[]; closest?: { itemName: string; shopId: string; totalCents: number } | null };
+type GaveUp = { reason?: string; tried?: string[]; closest?: { itemName: string; shopId: string; totalCents: number } | null; limitCents?: number | null };
 
 /** What to say when the shopper decided there was nothing to buy. The reason is the shopper's own short summary. */
 export function giveUpMessage(o: GaveUp): { text: string; detail?: string } {
@@ -218,7 +218,7 @@ export function Home({ me, refreshMe, onNew, startId, onStarted }: { me: Me; ref
                 const waiting = open && (ideas > 0 || approval !== null);
                 const busy = going.has(r.id) || settling.has(r.id) || r.working;
                 const closed = r.status === "expired" && r.closedOutcome;
-                const closedText = closed && !runs[r.id] ? giveUpMessage(r.closedOutcome!) : null;
+                const closedText = closed && !runs[r.id] ? giveUpMessage({ ...r.closedOutcome!, limitCents: r.maxPriceCents }) : null;
                 const raise = closed && r.closedOutcome!.closest ? raisedLimitCents(r.closedOutcome!.closest.totalCents) : null;
                 const status =
                   r.status === "fulfilled" ? (

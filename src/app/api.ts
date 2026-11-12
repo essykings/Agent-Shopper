@@ -468,7 +468,8 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
     await notPaused(userId);
     const live = hub.start(userId);
     const mandateId = idOf(c);
-    const item = (await pool.query<{ item: string }>("select item from mandates where id = $1 and user_id = $2", [mandateId, userId])).rows[0]?.item;
+    const asked = (await pool.query<{ item: string; max_price_cents: number }>("select item, max_price_cents from mandates where id = $1 and user_id = $2", [mandateId, userId])).rows[0];
+    const item = asked?.item;
     live.emit({ type: "start", ...(item ? { item } : {}) });
     working.add(mandateId);
     let r;
@@ -502,7 +503,7 @@ export function createApi(pool: Pool, deps: AppDeps): Hono<Vars> {
         [mandateId, userId, JSON.stringify({ reason: r.outcome.reason, tried: r.outcome.tried ?? [], closest: r.outcome.closest ?? null })],
       );
       if (closed.rows[0]) await appendLedger(pool, { userId, mandateId, kind: "set_aside_release", amountCents: closed.rows[0].set_aside_cents });
-      await notify(pool, { userId, kind: "not_found", text: `Nothing was bought for "${item ?? "that"}". ${giveUpBody(r.outcome)}`, href: "#/", key: `run:${mandateId}` });
+      await notify(pool, { userId, kind: "not_found", text: `Nothing was bought for "${item ?? "that"}". ${giveUpBody({ ...r.outcome, limitCents: asked?.max_price_cents ?? null })}`, href: "#/", key: `run:${mandateId}` });
     }
     if (r.stage === "agent") return c.json({ stage: "agent", outcome: r.outcome, closed: r.outcome.status === "gave_up", ...run });
     if (r.stage === "shortlist") return c.json({ stage: "shortlist", picks: r.picks, summary: r.summary, ...run });

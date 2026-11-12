@@ -1738,8 +1738,8 @@ test("a request the shopper gave up on keeps what it said, including the closest
 
   // The notification and the request say the same thing: one builder writes the body of both.
   const note = ((await b.get("/api/notifications")).json.items as any[]).find((n) => n.kind === "not_found");
-  assert.equal(note.text, `Nothing was bought for "Camping tent for adults". ${giveUpBody({ reason: row.closedOutcome.reason, closest: row.closedOutcome.closest })}`);
-  assert.match(note.text, /The cheapest option from a shop you can trust is Tent, 2 person at Trailhead for \$128\.00\./);
+  assert.equal(note.text, `Nothing was bought for "Camping tent for adults". ${giveUpBody({ reason: row.closedOutcome.reason, closest: row.closedOutcome.closest, limitCents: 10_000 })}`);
+  assert.equal(note.text, 'Nothing was bought for "Camping tent for adults". The closest is Tent, 2 person at Trailhead for $128.00, $28.00 over your $100.00 limit.');
 });
 
 test("when the AI service refuses the app's key or is busy, the person is told so plainly and nothing is bought", { skip }, async () => {
